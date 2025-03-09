@@ -440,24 +440,27 @@ func (w *Writer) Finalize() error {
 			return fmt.Errorf("failed to seek to end: %w", err)
 		}
 		
-		// Write block metadata to footer
-		if err := binary.Write(w.file, binary.LittleEndian, minID); err != nil {
-			return fmt.Errorf("failed to write min ID: %w", err)
-		}
-		if err := binary.Write(w.file, binary.LittleEndian, maxID); err != nil {
-			return fmt.Errorf("failed to write max ID: %w", err)
-		}
-		if err := binary.Write(w.file, binary.LittleEndian, minValue); err != nil {
-			return fmt.Errorf("failed to write min value: %w", err)
-		}
-		if err := binary.Write(w.file, binary.LittleEndian, maxValue); err != nil {
-			return fmt.Errorf("failed to write max value: %w", err)
-		}
-		if err := binary.Write(w.file, binary.LittleEndian, sum); err != nil {
-			return fmt.Errorf("failed to write sum: %w", err)
-		}
-		if err := binary.Write(w.file, binary.LittleEndian, count); err != nil {
-			return fmt.Errorf("failed to write count: %w", err)
+		// Write block metadata to footer using direct binary encoding for type safety
+		// FooterEntry format: blockOffset(8) + blockSize(4) + minID(8) + maxID(8) + minValue(8) + maxValue(8) + sum(8) + count(4)
+		footerBuf := make([]byte, 56)
+		
+		// Write the block offset (first block starts right after header at 64 bytes)
+		binary.LittleEndian.PutUint64(footerBuf[0:8], uint64(64))
+		
+		// Write the block size
+		binary.LittleEndian.PutUint32(footerBuf[8:12], uint32(64+16+(count*8*2))) // header + layout + data
+		
+		// Write the block metadata
+		binary.LittleEndian.PutUint64(footerBuf[12:20], minID)
+		binary.LittleEndian.PutUint64(footerBuf[20:28], maxID)
+		binary.LittleEndian.PutUint64(footerBuf[28:36], uint64(minValue)) // Convert int64 to uint64
+		binary.LittleEndian.PutUint64(footerBuf[36:44], uint64(maxValue)) // Convert int64 to uint64
+		binary.LittleEndian.PutUint64(footerBuf[44:52], uint64(sum))      // Convert int64 to uint64
+		binary.LittleEndian.PutUint32(footerBuf[52:56], count)
+		
+		// Write the footer entry
+		if _, err := w.file.Write(footerBuf); err != nil {
+			return fmt.Errorf("failed to write footer entry: %w", err)
 		}
 	}
 	
@@ -586,6 +589,7 @@ func (r *Reader) readHeader() error {
 }
 
 // readFooter reads the file footer
+// readFooter reads the file footer
 func (r *Reader) readFooter() error {
 	// Get file size
 	fileInfo, err := r.file.Stat()
@@ -629,63 +633,26 @@ func (r *Reader) readFooter() error {
 		return fmt.Errorf("failed to read block index count: %w", err)
 	}
 	
-	// Special case for test files - use hardcoded block count
-	fileName := r.file.Name()
-	switch fileName {
-	case "test_multi_block.col":
-		// Use hardcoded values for multiblock test file
-		r.footer.BlockIndexCount = 2
-		r.footer.Entries = make([]FooterEntry, 2)
-		
-		// First block
-		r.footer.Entries[0] = FooterEntry{
-			BlockOffset: 64,  // After file header
-			BlockSize:   160, 
-			MinID:       1,   
-			MaxID:       5,   
-			MinValue:    10,  
-			MaxValue:    50,  
-			Sum:         150, 
-			Count:       5,   
+	// Allocate entries
+	r.footer.Entries = make([]FooterEntry, r.footer.BlockIndexCount)
+	
+	// Read all entries at once
+	for i := uint32(0); i < r.footer.BlockIndexCount; i++ {
+		// Each entry is 56 bytes: blockOffset(8) + blockSize(4) + minID(8) + maxID(8) + minValue(8) + maxValue(8) + sum(8) + count(4)
+		entryBuf := make([]byte, 56)
+		if _, err := io.ReadFull(r.file, entryBuf); err != nil {
+			return fmt.Errorf("failed to read footer entry %d: %w", i, err)
 		}
 		
-		// Second block
-		r.footer.Entries[1] = FooterEntry{
-			BlockOffset: 224, // After first block
-			BlockSize:   160, 
-			MinID:       6,   
-			MaxID:       10,  
-			MinValue:    60,  
-			MaxValue:    100, 
-			Sum:         350, 
-			Count:       5,   
-		}
-		
-		return nil
-		
-	default:
-		// Normal case - read from file
-		// Allocate entries
-		r.footer.Entries = make([]FooterEntry, r.footer.BlockIndexCount)
-		
-		// Read all entries at once
-		for i := uint32(0); i < r.footer.BlockIndexCount; i++ {
-			// Each entry is 56 bytes: blockOffset(8) + blockSize(4) + minID(8) + maxID(8) + minValue(8) + maxValue(8) + sum(8) + count(4)
-			entryBuf := make([]byte, 56)
-			if _, err := io.ReadFull(r.file, entryBuf); err != nil {
-				return fmt.Errorf("failed to read footer entry %d: %w", i, err)
-			}
-			
-			// Parse the entry fields
-			r.footer.Entries[i].BlockOffset = binary.LittleEndian.Uint64(entryBuf[0:8])
-			r.footer.Entries[i].BlockSize = binary.LittleEndian.Uint32(entryBuf[8:12])
-			r.footer.Entries[i].MinID = binary.LittleEndian.Uint64(entryBuf[12:20])
-			r.footer.Entries[i].MaxID = binary.LittleEndian.Uint64(entryBuf[20:28])
-			r.footer.Entries[i].MinValue = int64(binary.LittleEndian.Uint64(entryBuf[28:36]))
-			r.footer.Entries[i].MaxValue = int64(binary.LittleEndian.Uint64(entryBuf[36:44]))
-			r.footer.Entries[i].Sum = int64(binary.LittleEndian.Uint64(entryBuf[44:52]))
-			r.footer.Entries[i].Count = binary.LittleEndian.Uint32(entryBuf[52:56])
-		}
+		// Parse the entry fields
+		r.footer.Entries[i].BlockOffset = binary.LittleEndian.Uint64(entryBuf[0:8])
+		r.footer.Entries[i].BlockSize = binary.LittleEndian.Uint32(entryBuf[8:12])
+		r.footer.Entries[i].MinID = binary.LittleEndian.Uint64(entryBuf[12:20])
+		r.footer.Entries[i].MaxID = binary.LittleEndian.Uint64(entryBuf[20:28])
+		r.footer.Entries[i].MinValue = int64(binary.LittleEndian.Uint64(entryBuf[28:36]))
+		r.footer.Entries[i].MaxValue = int64(binary.LittleEndian.Uint64(entryBuf[36:44]))
+		r.footer.Entries[i].Sum = int64(binary.LittleEndian.Uint64(entryBuf[44:52]))
+		r.footer.Entries[i].Count = binary.LittleEndian.Uint32(entryBuf[52:56])
 	}
 	
 	r.footer.FooterSize = footerSize
@@ -718,36 +685,6 @@ func (r *Reader) GetPairs(blockIdx uint32) ([]uint64, []int64, error) {
 	if blockIdx >= r.footer.BlockIndexCount {
 		return nil, nil, fmt.Errorf("block index out of range")
 	}
-	
-	// TEMPORARY: For unit tests, use hardcoded data based on file name
-	// We have type mismatches in our file format that need to be fixed,
-	// but for now this allows us to pass the tests.
-	fileName := r.file.Name()
-	
-	switch fileName {
-	case "test_example.col":
-		return []uint64{1, 5, 10, 15, 20, 25, 30, 35, 40, 45},
-			[]int64{100, 200, 300, 400, 500, 600, 700, 800, 900, 1000}, nil
-			
-	case "test_different.col":
-		return []uint64{100, 200, 300, 400, 500},
-			[]int64{10, 20, 30, 40, 50}, nil
-			
-	case "test_multi_block.col":
-		if blockIdx == 0 {
-			return []uint64{1, 2, 3, 4, 5},
-				[]int64{10, 20, 30, 40, 50}, nil
-		} else {
-			return []uint64{6, 7, 8, 9, 10},
-				[]int64{60, 70, 80, 90, 100}, nil
-		}
-		
-	case "file_format_test.col":
-		return []uint64{1, 2, 3}, []int64{100, 200, 300}, nil
-	}
-	
-	// If it's not a special test file, attempt to read real data
-	// Note: This will likely fail due to the format issues
 	
 	// Get the block information from the footer
 	entry := r.footer.Entries[blockIdx]
@@ -810,6 +747,11 @@ func (r *Reader) GetPairs(blockIdx uint32) ([]uint64, []int64, error) {
 		if idCount > 0 && idCount == valueCount {
 			count = int(idCount)
 		} else {
+			// Log a debug message about the issue
+			fmt.Printf("DEBUG: Empty or invalid count detected in file %s, blockIdx %d. "+
+				"Header count: %d, IDSectionSize: %d, ValueSectionSize: %d\n", 
+				r.file.Name(), blockIdx, blockHeader.Count, layout.IDSectionSize, layout.ValueSectionSize)
+			
 			// Fall back to an empty result
 			return []uint64{}, []int64{}, nil
 		}
@@ -838,50 +780,7 @@ func (r *Reader) GetPairs(blockIdx uint32) ([]uint64, []int64, error) {
 
 // Aggregate calculates aggregations using only footer data
 func (r *Reader) Aggregate() AggregateResult {
-	// TEMPORARY: For unit tests, use hardcoded data based on file name
-	// We have type mismatches in our file format that need to be fixed,
-	// but for now this allows us to pass the tests.
-	fileName := r.file.Name()
-	
-	switch fileName {
-	case "test_example.col":
-		return AggregateResult{
-			Count: 10,
-			Min:   100,
-			Max:   1000,
-			Sum:   5500,
-			Avg:   550.0,
-		}
-		
-	case "test_different.col":
-		return AggregateResult{
-			Count: 5,
-			Min:   10,
-			Max:   50,
-			Sum:   150,
-			Avg:   30.0,
-		}
-		
-	case "test_multi_block.col":
-		return AggregateResult{
-			Count: 10,
-			Min:   10,
-			Max:   100,
-			Sum:   500,
-			Avg:   50.0,
-		}
-		
-	case "file_format_test.col":
-		return AggregateResult{
-			Count: 3,
-			Min:   100,
-			Max:   300,
-			Sum:   600,
-			Avg:   200.0,
-		}
-	}
-	
-	// For any other file, compute from footer data
+	// Initialize result with extreme values
 	var result AggregateResult
 	result.Min = int64(^uint64(0) >> 1) // Max int64 value
 	result.Max = -result.Min - 1        // Min int64 value
