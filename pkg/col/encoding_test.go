@@ -1,6 +1,7 @@
 package col
 
 import (
+	"fmt"
 	"math/rand"
 	"reflect"
 	"testing"
@@ -266,5 +267,231 @@ func TestDeltaEncodeLarge(t *testing.T) {
 				break
 			}
 		}
+	}
+}
+
+func TestVarIntEncoding(t *testing.T) {
+	testCases := []uint64{
+		0,           // Single byte case
+		127,         // Max single byte value
+		128,         // Min two byte value
+		16383,       // Max two byte value
+		16384,       // Min three byte value
+		2097151,     // Max three byte value
+		2097152,     // Min four byte value
+		268435455,   // Max four byte value
+		268435456,   // Min five byte value
+		0xFFFFFFFF,  // 32-bit max
+		0xFFFFFFFFFFFFFFFF, // 64-bit max
+	}
+	
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("VarInt_%d", tc), func(t *testing.T) {
+			// Encode
+			encoded := encodeVarInt(tc)
+			
+			// Check encoding length follows expectations
+			expectedSize := 1
+			if tc >= 128 {
+				expectedSize = 2
+			}
+			if tc >= 16384 {
+				expectedSize = 3
+			}
+			if tc >= 2097152 {
+				expectedSize = 4
+			}
+			if tc >= 268435456 {
+				expectedSize = 5
+			}
+			if tc >= 34359738368 {
+				expectedSize = 6
+			}
+			
+			if len(encoded) != expectedSize && tc <= 0xFFFFFFFF {
+				t.Errorf("Value %d: expected encoding size %d, got %d. Bytes: %v", 
+					tc, expectedSize, len(encoded), encoded)
+			}
+			
+			// Decode
+			decoded, bytesRead := decodeVarInt(encoded)
+			
+			// Verify decoded value matches original
+			if decoded != tc {
+				t.Errorf("Decode mismatch: expected %d, got %d", tc, decoded)
+			}
+			
+			// Verify bytes read matches encoded length
+			if bytesRead != len(encoded) {
+				t.Errorf("Bytes read mismatch: encoded length %d, bytes read %d", 
+					len(encoded), bytesRead)
+			}
+		})
+	}
+}
+
+func TestSignedVarIntEncoding(t *testing.T) {
+	testCases := []int64{
+		0,           // Zero case
+		1,           // Small positive
+		-1,          // Small negative
+		63,          // Positive value near boundary
+		-64,         // Negative value near boundary
+		64,          // Positive value at boundary
+		-65,         // Negative value at boundary
+		127,         // Larger positive
+		-128,        // Larger negative
+		8191,        // Larger positive boundary
+		-8192,       // Larger negative boundary
+		1234567,     // Medium positive
+		-1234567,    // Medium negative
+		0x7FFFFFFF,  // 32-bit max positive
+		-0x80000000, // 32-bit min negative
+		0x7FFFFFFFFFFFFFFF, // 64-bit max positive
+		-0x8000000000000000, // 64-bit min negative
+	}
+	
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("SignedVarInt_%d", tc), func(t *testing.T) {
+			// Encode
+			encoded := encodeSignedVarInt(tc)
+			
+			// Decode
+			decoded, bytesRead := decodeSignedVarInt(encoded)
+			
+			// Verify decoded value matches original
+			if decoded != tc {
+				t.Errorf("Decode mismatch: expected %d, got %d", tc, decoded)
+			}
+			
+			// Verify bytes read matches encoded length
+			if bytesRead != len(encoded) {
+				t.Errorf("Bytes read mismatch: encoded length %d, bytes read %d", 
+					len(encoded), bytesRead)
+			}
+			
+			// Verify encoding is efficient
+			// Small integers should use fewer bytes
+			if tc >= -64 && tc < 64 && len(encoded) > 1 {
+				t.Errorf("Value %d: encoding not efficient. Used %d bytes", tc, len(encoded))
+			}
+		})
+	}
+}
+
+func TestVarintEncodingSize(t *testing.T) {
+	// Test various value ranges to verify encoding sizes
+	cases := []struct {
+		value        uint64
+		expectedSize int
+	}{
+		{0, 1},          // Minimum size is 1 byte
+		{127, 1},        // Max value for 1 byte
+		{128, 2},        // Min value for 2 bytes
+		{16383, 2},      // Max value for 2 bytes
+		{16384, 3},      // Min value for 3 bytes
+		{2097151, 3},    // Max value for 3 bytes
+		{2097152, 4},    // Min value for 4 bytes
+		{268435455, 4},  // Max value for 4 bytes
+		{1 << 35, 6},    // Larger value
+		{1 << 56, 9},    // Even larger
+		{^uint64(0), 10}, // Max uint64 value
+	}
+	
+	for _, c := range cases {
+		encoded := encodeVarInt(c.value)
+		if len(encoded) != c.expectedSize {
+			t.Errorf("Value %d: expected encoding size %d, got %d",
+				c.value, c.expectedSize, len(encoded))
+		}
+		
+		// Verify decoding
+		decoded, bytesRead := decodeVarInt(encoded)
+		if decoded != c.value {
+			t.Errorf("Value %d: decoded as %d", c.value, decoded)
+		}
+		if bytesRead != c.expectedSize {
+			t.Errorf("Value %d: bytes read %d, expected %d",
+				c.value, bytesRead, c.expectedSize)
+		}
+	}
+}
+
+func BenchmarkVarIntEncoding(b *testing.B) {
+	// Test values in different ranges
+	testValues := []uint64{
+		0,            // 1 byte
+		42,           // 1 byte
+		128,          // 2 bytes
+		16384,        // 3 bytes
+		2097152,      // 4 bytes
+		268435456,    // 5 bytes
+		34359738368,  // 6 bytes
+		^uint64(0),   // 10 bytes (max uint64)
+	}
+	
+	for _, v := range testValues {
+		b.Run(fmt.Sprintf("Encode_%d", v), func(b *testing.B) {
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = encodeVarInt(v)
+			}
+		})
+	}
+	
+	// Prepare encoded values for decoding benchmark
+	encodedValues := make([][]byte, len(testValues))
+	for i, v := range testValues {
+		encodedValues[i] = encodeVarInt(v)
+	}
+	
+	for i, encoded := range encodedValues {
+		b.Run(fmt.Sprintf("Decode_%d", testValues[i]), func(b *testing.B) {
+			b.ResetTimer()
+			for j := 0; j < b.N; j++ {
+				_, _ = decodeVarInt(encoded)
+			}
+		})
+	}
+}
+
+func BenchmarkSignedVarIntEncoding(b *testing.B) {
+	// Test values in different ranges
+	testValues := []int64{
+		0,                    // 1 byte
+		42,                   // 1 byte
+		-42,                  // 1 byte
+		1000,                 // 2 bytes
+		-1000,                // 2 bytes
+		1000000,              // 3 bytes
+		-1000000,             // 3 bytes
+		1000000000,           // 5 bytes
+		-1000000000,          // 5 bytes
+		0x7FFFFFFFFFFFFFFF,   // 10 bytes (max int64)
+		-0x8000000000000000,  // 10 bytes (min int64)
+	}
+	
+	for _, v := range testValues {
+		b.Run(fmt.Sprintf("Encode_%d", v), func(b *testing.B) {
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = encodeSignedVarInt(v)
+			}
+		})
+	}
+	
+	// Prepare encoded values for decoding benchmark
+	encodedValues := make([][]byte, len(testValues))
+	for i, v := range testValues {
+		encodedValues[i] = encodeSignedVarInt(v)
+	}
+	
+	for i, encoded := range encodedValues {
+		b.Run(fmt.Sprintf("Decode_%d", testValues[i]), func(b *testing.B) {
+			b.ResetTimer()
+			for j := 0; j < b.N; j++ {
+				_, _ = decodeSignedVarInt(encoded)
+			}
+		})
 	}
 }

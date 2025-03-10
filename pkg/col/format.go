@@ -20,6 +20,10 @@ const (
 	EncodingDeltaID   uint32 = 1 // Delta encoding for IDs
 	EncodingDeltaValue uint32 = 2 // Delta encoding for values
 	EncodingDeltaBoth  uint32 = 3 // Delta encoding for both IDs and values
+	EncodingVarInt     uint32 = 4 // Variable-length integer encoding
+	EncodingVarIntID   uint32 = 5 // Variable-length encoding for IDs
+	EncodingVarIntValue uint32 = 6 // Variable-length encoding for values
+	EncodingVarIntBoth  uint32 = 7 // Variable-length encoding for both IDs and values
 
 	// Compression types
 	CompressionNone uint32 = 0
