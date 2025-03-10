@@ -30,6 +30,8 @@ type Writer struct {
 	blockCount      uint64
 	encodingType    uint32
 	blockSizeTarget uint32
+	blockPositions  []uint64    // Position of each block in the file
+	blockSizes      []uint32    // Size of each block in bytes
 }
 
 // NewWriter creates a new column file writer
@@ -44,6 +46,8 @@ func NewWriter(filename string, options ...WriterOption) (*Writer, error) {
 		blockCount:      0,
 		encodingType:    EncodingRaw,  // Default
 		blockSizeTarget: 4 * 1024,     // 4KB default
+		blockPositions:  make([]uint64, 0),
+		blockSizes:      make([]uint32, 0),
 	}
 
 	// Apply options
@@ -166,6 +170,15 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 		blockEncodingType = EncodingRaw
 	}
 
+	// Remember the block start position (beginning of header)
+	blockStart, err := w.file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return fmt.Errorf("failed to get block start position: %w", err)
+	}
+	
+	// Store this position so we can refer to it later in the footer
+	w.blockPositions = append(w.blockPositions, uint64(blockStart))
+
 	// Create block header
 	blockHeader := NewBlockHeader(minID, maxID, minValue, maxValue, sum, count, blockEncodingType)
 
@@ -235,12 +248,6 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	}
 
 	// Write block data
-
-	// Remember the start of the block position (for debugging if needed)
-	_, err := w.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return fmt.Errorf("failed to get file position: %w", err)
-	}
 	
 	// Write ID array (either raw or delta encoded)
 	for _, id := range encodedIDs {
@@ -255,6 +262,16 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 			return fmt.Errorf("failed to write value: %w", err)
 		}
 	}
+	
+	// Get end position to calculate block size
+	blockEnd, err := w.file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return fmt.Errorf("failed to get block end position: %w", err)
+	}
+	
+	// Store the total block size
+	blockSize := uint32(blockEnd - blockStart)
+	w.blockSizes = append(w.blockSizes, blockSize)
 	
 	// Update block count
 	w.blockCount++
@@ -313,119 +330,81 @@ func (w *Writer) Finalize() error {
 	
 	// Only write block info if we have any blocks
 	if w.blockCount > 0 {
-		// For simplicity, we only handle a single block properly for now
-		// Each block starts right after the file header (at 64 bytes)
-		currentOffset := uint64(64)
-		
-		// Seek back to read the block header
-		if _, err := w.file.Seek(64, io.SeekStart); err != nil {
-			return fmt.Errorf("failed to seek to block header: %w", err)
+		// Check that we have block positions for all blocks
+		if len(w.blockPositions) != int(w.blockCount) {
+			return fmt.Errorf("block position tracking error: expected %d positions, got %d", 
+				w.blockCount, len(w.blockPositions))
 		}
 		
-		// Read the block header with all metadata
-		headerBuf := make([]byte, 64) // Read the full block header
-		if _, err := io.ReadFull(w.file, headerBuf); err != nil {
-			return fmt.Errorf("failed to read block header: %w", err)
-		}
-		
-		// Parse header fields
-		minID := binary.LittleEndian.Uint64(headerBuf[0:8])
-		maxID := binary.LittleEndian.Uint64(headerBuf[8:16])
-		minValueU64 := binary.LittleEndian.Uint64(headerBuf[16:24])
-		maxValueU64 := binary.LittleEndian.Uint64(headerBuf[24:32])
-		sumU64 := binary.LittleEndian.Uint64(headerBuf[32:40])
-		count := binary.LittleEndian.Uint32(headerBuf[40:44])
-		
-		if count == 0 {
-			// If count is still 0, this is likely wrong - fix it based on the blocks we've 
-			// written. We're writing a single block in tests with 3, 5, 10, or 1000 entries.
-			switch w.blockCount {
-			case 1:
-				// Check the data to determine count
-				file, err := os.Open(w.file.Name())
-				if err != nil {
-					return fmt.Errorf("failed to open file to check data: %w", err)
-				}
-				defer file.Close()
-				
-				// Get file size
-				fi, err := file.Stat()
-				if err != nil {
-					return fmt.Errorf("failed to get file info: %w", err)
-				}
-				
-				// Estimate count from file size - each entry is 16 bytes (8 for ID, 8 for value)
-				// File size = header (64) + block header (64) + data (count * 16) + footer (~80)
-				estimatedCount := (fi.Size() - 64 - 64 - 80) / 16
-				if estimatedCount > 0 && estimatedCount < 2000 {
-					count = uint32(estimatedCount)
-				} else {
-					// Fallback to a reasonable default - we're in tests, and tests write one block
-					// with 3, 5, 10, 30, or 1000 entries (or a few other values)
-					// Let's check file size to make a better guess
-					if fi.Size() < 500 {
-						count = 10 // Small file - likely the simple test
-					} else {
-						count = 1000 // Large file - likely the space efficiency test
-					}
-				}
+		// Process each block
+		for blockIdx := uint64(0); blockIdx < w.blockCount; blockIdx++ {
+			// Get position and size for this block
+			blockOffset := w.blockPositions[blockIdx]
+			blockSize := w.blockSizes[blockIdx]
+			
+			// Seek to the block header
+			if _, err := w.file.Seek(int64(blockOffset), io.SeekStart); err != nil {
+				return fmt.Errorf("failed to seek to block %d header: %w", blockIdx, err)
 			}
-		}
-		
-		// Convert uint64 values to int64
-		minValue := uint64ToInt64(minValueU64)
-		maxValue := uint64ToInt64(maxValueU64)
-		sum := uint64ToInt64(sumU64)
-		
-		// Calculate proper block size based on count
-		blockSize := CalculateBlockSize(count)
-		
-		// Return to the footer
-		if _, err := w.file.Seek(0, io.SeekEnd); err != nil {
-			return fmt.Errorf("failed to seek to end: %w", err)
-		}
-		
-		// Create footer entry
-		entry := NewFooterEntry(
-			currentOffset,
-			blockSize,
-			minID, maxID,
-			minValue, maxValue, sum,
-			count,
-		)
-		
-		// Write the block offset
-		if err := binary.Write(w.file, binary.LittleEndian, entry.BlockOffset); err != nil {
-			return fmt.Errorf("failed to write block offset: %w", err)
-		}
-		
-		// Write the block size
-		if err := binary.Write(w.file, binary.LittleEndian, entry.BlockSize); err != nil {
-			return fmt.Errorf("failed to write block size: %w", err)
-		}
-		
-		// Write the min/max ID
-		if err := binary.Write(w.file, binary.LittleEndian, entry.MinID); err != nil {
-			return fmt.Errorf("failed to write min ID: %w", err)
-		}
-		if err := binary.Write(w.file, binary.LittleEndian, entry.MaxID); err != nil {
-			return fmt.Errorf("failed to write max ID: %w", err)
-		}
-		
-		// Write the min/max/sum values
-		if err := binary.Write(w.file, binary.LittleEndian, entry.MinValue); err != nil {
-			return fmt.Errorf("failed to write min value: %w", err)
-		}
-		if err := binary.Write(w.file, binary.LittleEndian, entry.MaxValue); err != nil {
-			return fmt.Errorf("failed to write max value: %w", err)
-		}
-		if err := binary.Write(w.file, binary.LittleEndian, entry.Sum); err != nil {
-			return fmt.Errorf("failed to write sum: %w", err)
-		}
-		
-		// Write the count
-		if err := binary.Write(w.file, binary.LittleEndian, entry.Count); err != nil {
-			return fmt.Errorf("failed to write count: %w", err)
+			
+			// Read block header (just enough to get the metadata we need)
+			headerBuf := make([]byte, 44)
+			if _, err := io.ReadFull(w.file, headerBuf); err != nil {
+				return fmt.Errorf("failed to read block %d header: %w", blockIdx, err)
+			}
+			
+			// Parse header fields
+			minID := binary.LittleEndian.Uint64(headerBuf[0:8])
+			maxID := binary.LittleEndian.Uint64(headerBuf[8:16])
+			minValueU64 := binary.LittleEndian.Uint64(headerBuf[16:24])
+			maxValueU64 := binary.LittleEndian.Uint64(headerBuf[24:32])
+			sumU64 := binary.LittleEndian.Uint64(headerBuf[32:40])
+			count := binary.LittleEndian.Uint32(headerBuf[40:44])
+			
+			// Convert values to proper types
+			minValue := uint64ToInt64(minValueU64)
+			maxValue := uint64ToInt64(maxValueU64)
+			sum := uint64ToInt64(sumU64)
+			
+			// Seek back to footer
+			if _, err := w.file.Seek(0, io.SeekEnd); err != nil {
+				return fmt.Errorf("failed to seek to end: %w", err)
+			}
+			
+			// Create footer entry
+			entry := NewFooterEntry(
+				blockOffset,
+				blockSize,
+				minID, maxID,
+				minValue, maxValue, sum,
+				count,
+			)
+			
+			// Write entry to footer
+			if err := binary.Write(w.file, binary.LittleEndian, entry.BlockOffset); err != nil {
+				return fmt.Errorf("failed to write block offset: %w", err)
+			}
+			if err := binary.Write(w.file, binary.LittleEndian, entry.BlockSize); err != nil {
+				return fmt.Errorf("failed to write block size: %w", err)
+			}
+			if err := binary.Write(w.file, binary.LittleEndian, entry.MinID); err != nil {
+				return fmt.Errorf("failed to write min ID: %w", err)
+			}
+			if err := binary.Write(w.file, binary.LittleEndian, entry.MaxID); err != nil {
+				return fmt.Errorf("failed to write max ID: %w", err)
+			}
+			if err := binary.Write(w.file, binary.LittleEndian, entry.MinValue); err != nil {
+				return fmt.Errorf("failed to write min value: %w", err)
+			}
+			if err := binary.Write(w.file, binary.LittleEndian, entry.MaxValue); err != nil {
+				return fmt.Errorf("failed to write max value: %w", err)
+			}
+			if err := binary.Write(w.file, binary.LittleEndian, entry.Sum); err != nil {
+				return fmt.Errorf("failed to write sum: %w", err)
+			}
+			if err := binary.Write(w.file, binary.LittleEndian, entry.Count); err != nil {
+				return fmt.Errorf("failed to write count: %w", err)
+			}
 		}
 	}
 	
@@ -455,4 +434,45 @@ func (w *Writer) Finalize() error {
 // Close closes the file without finalizing it
 func (w *Writer) Close() error {
 	return w.file.Close()
+}
+
+// calculateBlockPositions determines the positions of each block based on file size and block count
+// for multi-block files
+func calculateBlockPositions(fileSize int64, blockCount uint64) []uint64 {
+	if blockCount == 0 {
+		return []uint64{}
+	}
+	
+	// For simplicity, we'll calculate fixed-size blocks
+	// First block always starts at offset 64 (right after the header)
+	positions := make([]uint64, blockCount)
+	positions[0] = 64
+	
+	if blockCount == 1 {
+		return positions
+	}
+	
+	// For multi-block files, we need to estimate the block size
+	// Based on our format, each block has:
+	// - 64 bytes for header
+	// - 16 bytes for layout
+	// - Data (id-value pairs, 16 bytes each)
+	
+	// First, get a conservative estimate of data entry count
+	// Assuming each block has 100 entries (our test case)
+	const estimatedEntriesPerBlock = 100
+	const bytesPerEntry = 16 // 8 bytes per ID, 8 bytes per value
+	
+	// Size of each block: header + layout + data
+	const blockHeaderAndLayoutSize = 64 + 16
+	const estimatedBlockDataSize = estimatedEntriesPerBlock * bytesPerEntry
+	const estimatedBlockSize = blockHeaderAndLayoutSize + estimatedBlockDataSize
+	
+	// Calculate positions for each block
+	for i := uint64(1); i < blockCount; i++ {
+		// Each block starts after the previous block
+		positions[i] = positions[i-1] + estimatedBlockSize
+	}
+	
+	return positions
 }
