@@ -99,16 +99,19 @@ Each block has a common layout structure regardless of encoding:
 +-------------------+----------------+----------------------------------+
 | Field             | Size (bytes)   | Description                      |
 +-------------------+----------------+----------------------------------+
-| ID Section Offset | 4              | Offset to start of ID data       |
-| ID Section Size   | 4              | Size of ID data section          |
-| Value Section Off | 4              | Offset to start of value data    |
-| Value Section Size| 4              | Size of value data section       |
+| Data Section Header| 16            | Contains:                        |
+|                    |               | - ID Section Size (4 bytes)      |
+|                    |               | - Value Section Size (4 bytes)   |
+|                    |               | - Entry Count (4 bytes)          |
+|                    |               | - Reserved (4 bytes)             |
++-------------------+----------------+----------------------------------+
 | ID Data           | Variable       | Encoded ID data                  |
++-------------------+----------------+----------------------------------+
 | Value Data        | Variable       | Encoded value data               |
 +-------------------+----------------+----------------------------------+
 ```
 
-This structure allows readers to quickly locate different sections without assumptions about encoding-specific sizes. The offsets are relative to the end of the block header.
+This structure allows readers to quickly locate different sections without making assumptions about encoding-specific sizes. The header contains the exact size of each section, enabling precise navigation through the file.
 
 #### 4.2.1 Raw Encoding
 
@@ -125,26 +128,50 @@ When using raw encoding (type = 0), the data sections contain:
 
 #### 4.2.2 Delta Encoding
 
-When using delta encoding (type = 1), the data sections contain:
+When using delta encoding (types 1, 2, or 3), the data sections contain:
 
 ```
 +-------------------+----------------+----------------------------------+
 | Field             | Size (bytes)   | Description                      |
 +-------------------+----------------+----------------------------------+
 | ID Data           | Variable       | Contains:                        |
-|                   |                | - Base ID (8 bytes)              |
-|                   |                | - Delta encoding metadata        |
-|                   |                | - Encoded delta values           |
+|                   |                | - First ID stored as-is          |
+|                   |                | - Subsequent IDs as deltas from  |
+|                   |                |   previous value                 |
 +-------------------+----------------+----------------------------------+
-| Value Data        | Variable       | Value encoding format depends on |
-|                   |                | the compression method used      |
+| Value Data        | Variable       | Contains:                        |
+|                   |                | - First value stored as-is       |
+|                   |                | - Subsequent values as deltas    |
+|                   |                |   from previous value            |
 +-------------------+----------------+----------------------------------+
 ```
 
-The delta encoding format includes metadata that specifies:
-- Bit width used for delta values
-- Whether zigzag encoding is used
-- Any compression-specific parameters
+With EncodingDeltaID (type 1), only the IDs are delta-encoded, while values are stored as-is.
+With EncodingDeltaValue (type 2), only the values are delta-encoded, while IDs are stored as-is.
+With EncodingDeltaBoth (type 3), both IDs and values are delta-encoded.
+
+#### 4.2.3 Variable-Length (VarInt) Encoding
+
+When using variable-length encoding (types 4, 5, 6, or 7), the data sections contain:
+
+```
++-------------------+----------------+----------------------------------+
+| Field             | Size (bytes)   | Description                      |
++-------------------+----------------+----------------------------------+
+| ID Data           | Variable       | Each ID encoded as a variable    |
+|                   |                | number of bytes depending on     |
+|                   |                | value magnitude                  |
++-------------------+----------------+----------------------------------+
+| Value Data        | Variable       | Each value encoded using ZigZag  |
+|                   |                | encoding followed by variable-   |
+|                   |                | length encoding                  |
++-------------------+----------------+----------------------------------+
+```
+
+With EncodingVarInt (type 4), both IDs and values use variable-length encoding without delta.
+With EncodingVarIntID (type 5), only IDs use variable-length encoding, and they are delta-encoded.
+With EncodingVarIntValue (type 6), only values use variable-length encoding, and they are delta-encoded.
+With EncodingVarIntBoth (type 7), both IDs and values use variable-length encoding with delta encoding applied.
 
 ## 5. Footer
 
@@ -217,11 +244,14 @@ The system can implement multiple levels of skipping:
 
 #### 6.4.1 Encoding Types (reserved enum values)
 - 0: Raw (unencoded)
-- 1: Delta
-- 2: Dictionary
-- 3: Run-length
-- 4: Bit-packed
-- 5-15: Reserved for future encodings
+- 1: Delta encoding for IDs only
+- 2: Delta encoding for values only
+- 3: Delta encoding for both IDs and values
+- 4: Variable-length integer (VarInt) encoding
+- 5: Variable-length encoding for IDs only
+- 6: Variable-length encoding for values only
+- 7: Variable-length encoding for both IDs and values
+- 8-15: Reserved for future encodings
 
 #### 6.4.2 Compression Types (reserved enum values)
 - 0: None
@@ -251,7 +281,15 @@ The system can implement multiple levels of skipping:
 The reader should:
 1. Read and validate file header
 2. Read footer to obtain block index and block statistics
-3. For aggregation queries:
+3. For block reading:
+   a. Check the encoding type of the file and block
+   b. For variable-length encoding (VarInt), use specialized decoding routines:
+      - Use `decodeUVarInts` for ID sections
+      - Use `decodeSignedVarInt` for value sections
+   c. Apply delta decoding if the encoding type includes delta encoding:
+      - For EncodingDeltaID, EncodingDeltaValue, EncodingDeltaBoth
+      - For EncodingVarIntID, EncodingVarIntValue, EncodingVarIntBoth
+4. For aggregation queries:
    a. For unfiltered aggregations (sum, count, min, max, avg), compute directly from footer data
    b. For filtered aggregations:
       i. Determine required blocks by checking filter against min/max ID ranges
@@ -290,3 +328,41 @@ When multiple blocks need to be read:
 1. Process blocks in parallel using multiple threads/cores
 2. Use asynchronous I/O to overlap computation with disk reads
 3. Prioritize blocks that are most likely to contribute significantly to the result
+
+## 8. Encoding Details
+
+### 8.1 Variable-Length Integer (VarInt) Encoding
+
+The VarInt encoding uses a variable number of bytes to represent integers, which is more space-efficient for smaller values:
+
+- Numbers between 0-127 are encoded in a single byte
+- Larger numbers use multiple bytes with 7 bits per byte for the value
+- The most significant bit (MSB) of each byte is used as a continuation flag (1 = more bytes follow, 0 = final byte)
+
+This encoding is particularly efficient when:
+- Most values are small (fitting in 1-2 bytes)
+- Values have high variance, making delta encoding less effective
+- The data is sparse
+
+### 8.2 Signed VarInt Encoding
+
+For signed integers (int64 values), we use a ZigZag encoding to map signed values to unsigned values before applying VarInt encoding:
+
+- ZigZag encoding maps small negative and positive numbers to small unsigned numbers
+- The mapping follows: (value << 1) ^ (value >> 63)
+  - 0 → 0
+  - -1 → 1
+  - 1 → 2
+  - -2 → 3
+  - ...and so on
+
+This approach ensures that small values (both positive and negative) use fewer bytes.
+
+### 8.3 Delta Encoding
+
+Delta encoding stores the differences between consecutive values instead of the values themselves:
+- The first value is stored as-is
+- For each subsequent value, we store the difference from the previous value
+- This is particularly effective when values increase by small, consistent amounts
+
+When combined with VarInt encoding (EncodingVarIntBoth, etc.), the delta values are encoded using variable-length encoding for maximum space efficiency.
