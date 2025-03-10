@@ -111,6 +111,10 @@ func runWrite(outputFile, idsStr, valuesStr string) {
 }
 
 func runRead(inputFile string, dumpKV, aggregate bool) {
+	// Create a local flag set for help text if needed
+	readCmd := flag.NewFlagSet("read", flag.ExitOnError)
+	_ = readCmd.Bool("dump", false, "Dump all key-value pairs")
+	_ = readCmd.Bool("agg", false, "Show aggregations (count, min, max, sum, avg)")
 	// Open the reader
 	reader, err := col.NewReader(inputFile)
 	if err != nil {
@@ -131,7 +135,7 @@ func runRead(inputFile string, dumpKV, aggregate bool) {
 		
 		// For each block
 		for i := uint32(0); i < uint32(reader.BlockCount()); i++ {
-			ids, values, err := reader.GetPairs(i)
+			ids, values, err := reader.GetPairs(uint64(i))
 			if err != nil {
 				fmt.Printf("Error reading pairs from block %d: %v\n", i, err)
 				os.Exit(1)
