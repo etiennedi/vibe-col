@@ -18,9 +18,8 @@ func BenchmarkLargeFileWrite(b *testing.B) {
 	}{
 		{"Write_100K_SingleBlock_Raw", 100000, 100000, EncodingRaw},
 		{"Write_100K_SingleBlock_DeltaBoth", 100000, 100000, EncodingDeltaBoth},
-		// Skip multi-block tests for now until we fix the issue with large multi-block files
-		// {"Write_100K_10Blocks_Raw", 100000, 10000, EncodingRaw},
-		// {"Write_100K_10Blocks_DeltaBoth", 100000, 10000, EncodingDeltaBoth},
+		{"Write_100K_10Blocks_Raw", 100000, 10000, EncodingRaw},
+		{"Write_100K_10Blocks_DeltaBoth", 100000, 10000, EncodingDeltaBoth},
 	}
 
 	for _, bm := range benchmarks {
@@ -117,9 +116,8 @@ func BenchmarkLargeFileRead(b *testing.B) {
 	}{
 		{"Read_100K_SingleBlock_Raw", 100000, 100000, EncodingRaw},
 		{"Read_100K_SingleBlock_DeltaBoth", 100000, 100000, EncodingDeltaBoth},
-		// Skip multi-block tests for now until we fix the issue with large multi-block files
-		// {"Read_100K_10Blocks_Raw", 100000, 10000, EncodingRaw},
-		// {"Read_100K_10Blocks_DeltaBoth", 100000, 10000, EncodingDeltaBoth},
+		{"Read_100K_10Blocks_Raw", 100000, 10000, EncodingRaw},
+		{"Read_100K_10Blocks_DeltaBoth", 100000, 10000, EncodingDeltaBoth},
 	}
 
 	for _, bm := range benchmarks {
@@ -246,9 +244,8 @@ func BenchmarkAggregation(b *testing.B) {
 	}{
 		{"Aggregate_100K_SingleBlock_Raw", 100000, 100000, EncodingRaw},
 		{"Aggregate_100K_SingleBlock_DeltaBoth", 100000, 100000, EncodingDeltaBoth},
-		// Skip multi-block tests for now until we fix the issue with large multi-block files
-		// {"Aggregate_100K_10Blocks_Raw", 100000, 10000, EncodingRaw},
-		// {"Aggregate_100K_10Blocks_DeltaBoth", 100000, 10000, EncodingDeltaBoth},
+		{"Aggregate_100K_10Blocks_Raw", 100000, 10000, EncodingRaw},
+		{"Aggregate_100K_10Blocks_DeltaBoth", 100000, 10000, EncodingDeltaBoth},
 	}
 
 	for _, bm := range benchmarks {
