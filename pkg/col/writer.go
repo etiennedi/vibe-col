@@ -1,3 +1,4 @@
+// Package col implements a column-based storage format for id-value pairs.
 package col
 
 import (
@@ -149,7 +150,7 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	var encodedValues []int64
 	blockEncodingType := w.encodingType
 	
-	// Apply delta encoding if enabled
+	// Apply encoding based on the selected type
 	switch w.encodingType {
 	case EncodingRaw:
 		encodedIDs = ids
@@ -163,6 +164,17 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	case EncodingDeltaBoth:
 		encodedIDs = deltaEncode(ids)
 		encodedValues = deltaEncodeInt64(values)
+	case EncodingVarInt, EncodingVarIntID, EncodingVarIntValue, EncodingVarIntBoth:
+		// For variable-length encoding, we'll prepare the data below
+		// but we need to keep track of the encoding type
+		encodedIDs = ids
+		encodedValues = values
+		
+		// For combined VarInt+Delta encoding
+		if w.encodingType == EncodingVarIntBoth {
+			encodedIDs = deltaEncode(ids)
+			encodedValues = deltaEncodeInt64(values)
+		}
 	default:
 		// Fallback to raw for unknown encoding
 		encodedIDs = ids
@@ -208,10 +220,79 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 		return fmt.Errorf("failed to write compression type: %w", err)
 	}
 
-	// Calculate sizes - 8 bytes per ID and value
-	idSectionSize := uint32(count * 8) // Each ID is 8 bytes
-	valueSectionSize := uint32(count * 8) // Each value is 8 bytes
-	dataSize := idSectionSize + valueSectionSize // Total data size
+	// Determine if we need to use variable-length encoding
+	useVarIntForIDs := blockEncodingType == EncodingVarInt || 
+	                   blockEncodingType == EncodingVarIntID || 
+	                   blockEncodingType == EncodingVarIntBoth
+	useVarIntForValues := blockEncodingType == EncodingVarInt || 
+	                      blockEncodingType == EncodingVarIntValue || 
+	                      blockEncodingType == EncodingVarIntBoth
+
+	// Calculate section sizes - these will vary if using varint encoding
+	var idSectionSize uint32
+	var valueSectionSize uint32
+	
+	// Calculate sizes based on encoding
+	// For varInt encoding, we need to precompute the encoded values array
+	// so we know the exact size
+	var encodedIdBytes [][]byte
+	var encodedValueBytes [][]byte
+	
+	if useVarIntForIDs {
+		// Precompute the encoded bytes for each ID
+		encodedIdBytes = make([][]byte, len(encodedIDs))
+		idSectionSize = 0
+		
+		for i, id := range encodedIDs {
+			// Encode this ID as varint
+			encodedIdBytes[i] = encodeVarInt(id)
+			// Add the size of this encoded ID
+			idSize := uint32(len(encodedIdBytes[i]))
+			
+			if idSize == 0 {
+				// This should never happen - a minimum of 1 byte is needed for varint
+				return fmt.Errorf("encoded size of ID at index %d is 0", i)
+			}
+			idSectionSize += idSize
+		}
+		// Sanity check
+		if idSectionSize == 0 && len(encodedIDs) > 0 {
+			// Should never happen if the loop ran properly
+			return fmt.Errorf("calculated ID section size is 0 with %d IDs", len(encodedIDs))
+		}
+		
+	} else {
+		// Fixed 8 bytes per ID
+		idSectionSize = uint32(count * 8)
+	}
+	
+	if useVarIntForValues {
+		// Precompute the encoded bytes for each value
+		encodedValueBytes = make([][]byte, len(encodedValues))
+		valueSectionSize = 0
+		for i, val := range encodedValues {
+			// Encode this value as signed varint
+			encodedValueBytes[i] = encodeSignedVarInt(val)
+			// Add the size of this encoded value
+			valSize := uint32(len(encodedValueBytes[i]))
+			if valSize == 0 {
+				// This should never happen - a minimum of 1 byte is needed for varint
+				return fmt.Errorf("encoded size of value at index %d is 0", i)
+			}
+			valueSectionSize += valSize
+		}
+		// Sanity check
+		if valueSectionSize == 0 && len(encodedValues) > 0 {
+			// Should never happen if the loop ran properly
+			return fmt.Errorf("calculated value section size is 0 with %d values", len(encodedValues))
+		}
+	} else {
+		// Fixed 8 bytes per value
+		valueSectionSize = uint32(count * 8)
+	}
+	
+	// Calculate total data size
+	dataSize := idSectionSize + valueSectionSize
 	
 	if err := binary.Write(w.file, binary.LittleEndian, dataSize); err != nil {
 		return fmt.Errorf("failed to write uncompressed size: %w", err)
@@ -230,47 +311,34 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	// We'll skip the reserved space since we're already over 64 bytes
 
 	// Write the block layout section (16 bytes)
-	// The section layout is:
-	// 1. ID section offset (from start of data)
+	// The section layout according to spec:
+	// 1. ID section offset (from start of data section)
 	// 2. ID section size in bytes
-	// 3. Value section offset (from start of data)
+	// 3. Value section offset (from start of data section)
 	// 4. Value section size in bytes
 	
 	// Create a layout buffer and fill it directly
 	layoutBuf := make([]byte, 16)
 	
-	// Set up the layout section properly
-	// IDs come first, so offset is 0
-	idSectionOffset := uint32(0)
-	// Values come after IDs
-	valueSectionOffset := idSectionSize
+	// Validate section sizes
+	if idSectionSize == 0 {
+		return fmt.Errorf("ID section size is 0, which is invalid. useVarIntForIDs=%v, count=%d",
+			useVarIntForIDs, count)
+	}
 	
-	// Very important: Actually write the sizes and offsets correctly
-	// Let's use direct byte operations instead of the binary package
+	// Per spec section 4.2:
+	// - ID section comes first after the 4-byte size header in the data section
+	// - Value section follows the ID section
 	
-	// ID section offset (bytes 0-3)
-	layoutBuf[0] = byte(idSectionOffset & 0xFF)
-	layoutBuf[1] = byte((idSectionOffset >> 8) & 0xFF)
-	layoutBuf[2] = byte((idSectionOffset >> 16) & 0xFF)
-	layoutBuf[3] = byte((idSectionOffset >> 24) & 0xFF)
+	// Use the binary package to properly write integers - using the layout from spec 4.2
+	idSectionOffset := uint32(4) // 4 bytes for size header
+	valueSectionOffset := idSectionOffset + idSectionSize
 	
-	// ID section size (bytes 4-7)
-	layoutBuf[4] = byte(idSectionSize & 0xFF)
-	layoutBuf[5] = byte((idSectionSize >> 8) & 0xFF)
-	layoutBuf[6] = byte((idSectionSize >> 16) & 0xFF)
-	layoutBuf[7] = byte((idSectionSize >> 24) & 0xFF)
+	binary.LittleEndian.PutUint32(layoutBuf[0:4], idSectionOffset) // ID Section Offset (after 4-byte size header)
+	binary.LittleEndian.PutUint32(layoutBuf[4:8], idSectionSize) // ID Section Size
+	binary.LittleEndian.PutUint32(layoutBuf[8:12], valueSectionOffset) // Value Section Offset (ID offset + ID size)
+	binary.LittleEndian.PutUint32(layoutBuf[12:16], valueSectionSize) // Value Section Size
 	
-	// Value section offset (bytes 8-11)
-	layoutBuf[8] = byte(valueSectionOffset & 0xFF)
-	layoutBuf[9] = byte((valueSectionOffset >> 8) & 0xFF)
-	layoutBuf[10] = byte((valueSectionOffset >> 16) & 0xFF)
-	layoutBuf[11] = byte((valueSectionOffset >> 24) & 0xFF)
-	
-	// Value section size (bytes 12-15)
-	layoutBuf[12] = byte(valueSectionSize & 0xFF)
-	layoutBuf[13] = byte((valueSectionSize >> 8) & 0xFF)
-	layoutBuf[14] = byte((valueSectionSize >> 16) & 0xFF)
-	layoutBuf[15] = byte((valueSectionSize >> 24) & 0xFF)
 	
 	// Write the layout buffer to file
 	if _, err := w.file.Write(layoutBuf); err != nil {
@@ -283,18 +351,47 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	}
 
 	// Write block data
+	// Get current position at the start of data section (for debugging)
+	_, _ = w.file.Seek(0, io.SeekCurrent)
 	
-	// Write ID array (either raw or delta encoded)
-	for _, id := range encodedIDs {
-		if err := binary.Write(w.file, binary.LittleEndian, id); err != nil {
-			return fmt.Errorf("failed to write ID: %w", err)
+	// Write the data section size (4 bytes)
+	if err := binary.Write(w.file, binary.LittleEndian, uint32(dataSize)); err != nil {
+		return fmt.Errorf("failed to write data section size: %w", err)
+	}
+	
+	// Write ID array based on encoding type
+	if useVarIntForIDs {
+		// Use variable-length encoding for IDs (using precomputed values)
+		for i := range encodedIDs {
+			// Write the precomputed varint bytes for this ID
+			if _, err := w.file.Write(encodedIdBytes[i]); err != nil {
+				return fmt.Errorf("failed to write varint ID: %w", err)
+			}
+		}
+	} else {
+		// Write fixed-length IDs
+		for _, id := range encodedIDs {
+			if err := binary.Write(w.file, binary.LittleEndian, id); err != nil {
+				return fmt.Errorf("failed to write ID: %w", err)
+			}
 		}
 	}
 	
-	// Write Value array (either raw or delta encoded)
-	for _, val := range encodedValues {
-		if err := binary.Write(w.file, binary.LittleEndian, val); err != nil {
-			return fmt.Errorf("failed to write value: %w", err)
+	// Write Value array based on encoding type
+	if useVarIntForValues {
+		// Use variable-length encoding for values (using precomputed values)
+		for i := range encodedValues {
+			// Write the precomputed varint bytes for this value
+			if _, err := w.file.Write(encodedValueBytes[i]); err != nil {
+				return fmt.Errorf("failed to write varint value: %w", err)
+			}
+		}
+	} else {
+		// Write fixed-length values
+		for _, val := range encodedValues {
+			if err := binary.Write(w.file, binary.LittleEndian, val); err != nil {
+				return fmt.Errorf("failed to write value: %w", err)
+			}
 		}
 	}
 	
