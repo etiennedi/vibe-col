@@ -1,6 +1,7 @@
 package col
 
 import (
+	"fmt"
 	"os"
 	"testing"
 )
@@ -21,7 +22,7 @@ func TestVarintEncoding_WriteRead(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to create writer: %v", err)
 		}
-		
+
 		// Print debug info about our test data
 		t.Logf("Test data: %d IDs and %d values", len(ids), len(values))
 
@@ -148,7 +149,7 @@ func TestVarintEncodingCompression(t *testing.T) {
 	// Sequential IDs (1, 2, 3, ...) - delta encoding will be efficient
 	// Small values (0, 1, 2, ...) - varint encoding will be efficient
 	for i := 0; i < count; i++ {
-		ids[i] = uint64(i + 1) // Start from 1
+		ids[i] = uint64(i + 1)     // Start from 1
 		values[i] = int64(i % 100) // Small values (0-99)
 	}
 
@@ -191,16 +192,16 @@ func TestVarintEncodingCompression(t *testing.T) {
 
 	// Verify that the varint file is significantly smaller
 	if varIntSize >= rawSize {
-		t.Errorf("VarInt encoding should result in smaller file, but got: raw=%d bytes, varint=%d bytes", 
+		t.Errorf("VarInt encoding should result in smaller file, but got: raw=%d bytes, varint=%d bytes",
 			rawSize, varIntSize)
 	} else {
 		compressionRatio := float64(rawSize) / float64(varIntSize)
-		t.Logf("VarInt compression: raw=%d bytes, varint=%d bytes, ratio=%.2fx", 
+		t.Logf("VarInt compression: raw=%d bytes, varint=%d bytes, ratio=%.2fx",
 			rawSize, varIntSize, compressionRatio)
-		
+
 		// For small sequential values, we expect at least 2x compression
 		if compressionRatio < 2.0 {
-			t.Errorf("VarInt compression ratio (%.2fx) is lower than expected (at least 2x)", 
+			t.Errorf("VarInt compression ratio (%.2fx) is lower than expected (at least 2x)",
 				compressionRatio)
 		}
 	}
@@ -231,24 +232,71 @@ func TestVarintEncodingCompression(t *testing.T) {
 
 	// Check data integrity
 	if len(rawIds) != count || len(varIntIds) != count {
-		t.Errorf("ID count mismatch: raw=%d, varint=%d, expected=%d", 
+		t.Errorf("ID count mismatch: raw=%d, varint=%d, expected=%d",
 			len(rawIds), len(varIntIds), count)
 	}
 
 	if len(rawValues) != count || len(varIntValues) != count {
-		t.Errorf("Value count mismatch: raw=%d, varint=%d, expected=%d", 
+		t.Errorf("Value count mismatch: raw=%d, varint=%d, expected=%d",
 			len(rawValues), len(varIntValues), count)
 	}
 
 	// Check some values to ensure they're identical
-	for i := 0; i < count; i += count/10 { // Check every 10% of entries
+	for i := 0; i < count; i += count / 10 { // Check every 10% of entries
 		if rawIds[i] != varIntIds[i] {
-			t.Errorf("ID mismatch at index %d: raw=%d, varint=%d", 
+			t.Errorf("ID mismatch at index %d: raw=%d, varint=%d",
 				i, rawIds[i], varIntIds[i])
 		}
 		if rawValues[i] != varIntValues[i] {
-			t.Errorf("Value mismatch at index %d: raw=%d, varint=%d", 
+			t.Errorf("Value mismatch at index %d: raw=%d, varint=%d",
 				i, rawValues[i], varIntValues[i])
 		}
+	}
+}
+
+func TestVarIntEncodeDecode(t *testing.T) {
+	testCases := []uint64{
+		0, 1, 2, 3, 4, 5, 10, 100, 127, 128, 129, 255, 256,
+		1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000,
+		0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF,
+	}
+
+	for _, tc := range testCases {
+		encoded := encodeVarInt(tc)
+		decoded, bytesRead := decodeVarInt(encoded)
+
+		if decoded != tc {
+			t.Errorf("Value mismatch: expected %d, got %d", tc, decoded)
+		}
+
+		if bytesRead != len(encoded) {
+			t.Errorf("Bytes read mismatch: expected %d, got %d", len(encoded), bytesRead)
+		}
+
+		fmt.Printf("Value: %d, encoded size: %d bytes, decoded: %d\n", tc, len(encoded), decoded)
+	}
+}
+
+func TestSignedVarIntEncodeDecode(t *testing.T) {
+	testCases := []int64{
+		0, 1, -1, 2, -2, 3, -3, 10, -10, 100, -100, 127, -127, 128, -128, 129, -129,
+		255, -255, 256, -256, 1000, -1000, 10000, -10000, 100000, -100000,
+		1000000, -1000000, 10000000, -10000000, 100000000, -100000000, 1000000000, -1000000000,
+		0x7FFFFFFFFFFFFFFF, -0x7FFFFFFFFFFFFFFF,
+	}
+
+	for _, tc := range testCases {
+		encoded := encodeSignedVarInt(tc)
+		decoded, bytesRead := decodeSignedVarInt(encoded)
+
+		if decoded != tc {
+			t.Errorf("Value mismatch: expected %d, got %d", tc, decoded)
+		}
+
+		if bytesRead != len(encoded) {
+			t.Errorf("Bytes read mismatch: expected %d, got %d", len(encoded), bytesRead)
+		}
+
+		fmt.Printf("Value: %d, encoded size: %d bytes, decoded: %d\n", tc, len(encoded), decoded)
 	}
 }

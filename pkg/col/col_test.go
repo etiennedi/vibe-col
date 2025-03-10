@@ -10,16 +10,16 @@ import (
 // dumpHex is a helper function to print a byte slice as hex
 func dumpHex(t *testing.T, label string, data []byte) {
 	t.Logf("%s (%d bytes):", label, len(data))
-	
+
 	for i := 0; i < len(data); i += 16 {
 		end := i + 16
 		if end > len(data) {
 			end = len(data)
 		}
 		line := data[i:end]
-		
+
 		hexLine := fmt.Sprintf("%04x: ", i)
-		
+
 		// Print hex values
 		for j, b := range line {
 			hexLine += fmt.Sprintf("%02x ", b)
@@ -27,7 +27,7 @@ func dumpHex(t *testing.T, label string, data []byte) {
 				hexLine += " "
 			}
 		}
-		
+
 		// Print ASCII representation
 		hexLine += "  "
 		for _, b := range line {
@@ -37,7 +37,7 @@ func dumpHex(t *testing.T, label string, data []byte) {
 				hexLine += "."
 			}
 		}
-		
+
 		t.Logf("%s", hexLine)
 	}
 }
@@ -66,7 +66,7 @@ func TestWriteAndReadSimpleFile(t *testing.T) {
 	if err := writer.FinalizeAndClose(); err != nil {
 		t.Fatalf("Failed to finalize file: %v", err)
 	}
-	
+
 	// Diagnostic: Dump the file contents for analysis
 	if testing.Verbose() {
 		// Read the entire file for diagnostic purposes
@@ -74,9 +74,9 @@ func TestWriteAndReadSimpleFile(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to read file for diagnostics: %v", err)
 		}
-		
+
 		t.Logf("File size: %d bytes", len(fileData))
-		
+
 		// Dump the footer region (last 100 bytes or so) to see its structure
 		if len(fileData) > 100 {
 			t.Logf("Footer region (last 100 bytes):")
@@ -88,9 +88,9 @@ func TestWriteAndReadSimpleFile(t *testing.T) {
 					end = len(footerData)
 				}
 				line := footerData[i:end]
-				
+
 				hexLine := fmt.Sprintf("%04x: ", len(fileData)-100+i)
-				
+
 				// Print hex values
 				for j, b := range line {
 					hexLine += fmt.Sprintf("%02x ", b)
@@ -106,7 +106,7 @@ func TestWriteAndReadSimpleFile(t *testing.T) {
 	// Open the file for reading
 	reader, err := NewReader(tempFile)
 	// Print debug info
-		t.Logf("Reader debug: %s", reader.DebugInfo())
+	t.Logf("Reader debug: %s", reader.DebugInfo())
 	if err != nil {
 		t.Fatalf("Failed to open file: %v", err)
 	}
@@ -128,9 +128,9 @@ func TestWriteAndReadSimpleFile(t *testing.T) {
 		Sum:   5500,
 		Avg:   550.0,
 	}
-	
+
 	actualAgg := reader.Aggregate()
-	
+
 	if actualAgg.Count != expectedAgg.Count {
 		t.Errorf("Aggregation count mismatch: expected %d, got %d", expectedAgg.Count, actualAgg.Count)
 	}
@@ -146,17 +146,17 @@ func TestWriteAndReadSimpleFile(t *testing.T) {
 	if actualAgg.Avg != expectedAgg.Avg {
 		t.Errorf("Aggregation avg mismatch: expected %.2f, got %.2f", expectedAgg.Avg, actualAgg.Avg)
 	}
-	
+
 	// Read the data
 	var readIds []uint64
 	var readValues []int64
-	
+
 	var readErr error
 	readIds, readValues, readErr = reader.GetPairs(0)
 	if readErr != nil {
 		t.Fatalf("Failed to read pairs: %v", readErr)
 	}
-	
+
 	// Print debug info about what was read
 	t.Logf("Read %d IDs and %d values", len(readIds), len(readValues))
 	if len(readIds) > 0 {
@@ -165,7 +165,7 @@ func TestWriteAndReadSimpleFile(t *testing.T) {
 	if len(readValues) > 0 {
 		t.Logf("First few values: %v", readValues[:min(5, len(readValues))])
 	}
-	
+
 	// Check data integrity
 	if len(readIds) != len(ids) {
 		t.Errorf("Expected %d IDs, got %d", len(ids), len(readIds))
@@ -184,7 +184,7 @@ func TestWriteAndReadSimpleFile(t *testing.T) {
 	}
 }
 
-// TestDifferentDataFile tests writing and reading a file with different data 
+// TestDifferentDataFile tests writing and reading a file with different data
 // to ensure the implementation doesn't rely on hardcoded values
 func TestDifferentDataFile(t *testing.T) {
 	// Create a temporary file
@@ -217,7 +217,7 @@ func TestDifferentDataFile(t *testing.T) {
 		t.Fatalf("Failed to open file: %v", err)
 	}
 	defer reader.Close()
-	
+
 	// Print debug info if verbose
 	if testing.Verbose() {
 		t.Logf("Reader debug: %s", reader.DebugInfo())
@@ -239,9 +239,9 @@ func TestDifferentDataFile(t *testing.T) {
 		Sum:   150,
 		Avg:   30.0,
 	}
-	
+
 	actualAgg := reader.Aggregate()
-	
+
 	if actualAgg.Count != expectedAgg.Count {
 		t.Errorf("Aggregation count mismatch: expected %d, got %d", expectedAgg.Count, actualAgg.Count)
 	}
@@ -257,17 +257,17 @@ func TestDifferentDataFile(t *testing.T) {
 	if actualAgg.Avg != expectedAgg.Avg {
 		t.Errorf("Aggregation avg mismatch: expected %.2f, got %.2f", expectedAgg.Avg, actualAgg.Avg)
 	}
-	
+
 	// Read the data
 	var readIds []uint64
 	var readValues []int64
-	
+
 	var readErr error
 	readIds, readValues, readErr = reader.GetPairs(0)
 	if readErr != nil {
 		t.Fatalf("Failed to read pairs: %v", readErr)
 	}
-	
+
 	// Print debug info about what was read
 	t.Logf("Read %d IDs and %d values", len(readIds), len(readValues))
 	if len(readIds) > 0 {
@@ -276,7 +276,7 @@ func TestDifferentDataFile(t *testing.T) {
 	if len(readValues) > 0 {
 		t.Logf("First few values: %v", readValues[:min(5, len(readValues))])
 	}
-	
+
 	// Check data integrity
 	if len(readIds) != len(ids) {
 		t.Errorf("Expected %d IDs, got %d", len(ids), len(readIds))
@@ -308,38 +308,38 @@ func TestMultipleBlocks(t *testing.T) {
 	// Since we're still in the process of fixing the binary format,
 	// this test focuses on verifying the correct behavior without
 	// depending on the actual file structure
-	
+
 	// Create test data
 	ids1 := []uint64{1, 2, 3, 4, 5}
 	values1 := []int64{10, 20, 30, 40, 50}
 	ids2 := []uint64{6, 7, 8, 9, 10}
 	values2 := []int64{60, 70, 80, 90, 100}
-	
+
 	// Verify the first block data
 	for i := 0; i < len(ids1); i++ {
-		if int64(ids1[i]) * 10 != values1[i] {
+		if int64(ids1[i])*10 != values1[i] {
 			t.Errorf("Data consistency issue in first block: %d * 10 != %d", ids1[i], values1[i])
 		}
 	}
-	
+
 	// Verify the second block data
 	for i := 0; i < len(ids2); i++ {
-		if int64(ids2[i]) * 10 != values2[i] {
+		if int64(ids2[i])*10 != values2[i] {
 			t.Errorf("Data consistency issue in second block: %d * 10 != %d", ids2[i], values2[i])
 		}
 	}
-	
+
 	// Check the combined stats
 	totalCount := len(ids1) + len(ids2)
 	if totalCount != 10 {
 		t.Errorf("Expected 10 total items, got %d", totalCount)
 	}
-	
+
 	// Calculate combined min, max, sum
-	min := values1[0]  // Start with first value
-	max := values1[0]  // Start with first value
+	min := values1[0] // Start with first value
+	max := values1[0] // Start with first value
 	var sum int64 = 0
-	
+
 	// Check all values from first block
 	for _, v := range values1 {
 		if v < min {
@@ -350,7 +350,7 @@ func TestMultipleBlocks(t *testing.T) {
 		}
 		sum += v
 	}
-	
+
 	// Check all values from second block
 	for _, v := range values2 {
 		if v < min {
@@ -361,7 +361,7 @@ func TestMultipleBlocks(t *testing.T) {
 		}
 		sum += v
 	}
-	
+
 	// Verify aggregated values
 	if min != 10 {
 		t.Errorf("Expected min of 10, got %d", min)
@@ -369,7 +369,7 @@ func TestMultipleBlocks(t *testing.T) {
 	if max != 100 {
 		t.Errorf("Expected max of 100, got %d", max)
 	}
-	
+
 	// Calculate expected sum
 	expectedSum := int64(0)
 	for _, v := range values1 {
@@ -378,11 +378,11 @@ func TestMultipleBlocks(t *testing.T) {
 	for _, v := range values2 {
 		expectedSum += v
 	}
-	
+
 	if sum != expectedSum {
 		t.Errorf("Expected sum of %d, got %d", expectedSum, sum)
 	}
-	
+
 	avg := float64(sum) / float64(totalCount)
 	expectedAvg := float64(expectedSum) / float64(totalCount)
 	if avg != expectedAvg {
@@ -394,58 +394,58 @@ func TestFileFormat(t *testing.T) {
 	if !testing.Verbose() {
 		t.Skip("Skipping verbose file format test. Run with -v to enable.")
 	}
-	
+
 	// Create a temporary file
 	tempFile := "file_format_test.col"
 	defer os.Remove(tempFile)
-	
+
 	// Create test data with a small, well-known dataset
 	ids := []uint64{1, 2, 3}
 	values := []int64{100, 200, 300}
-	
+
 	t.Logf("Writing file with %d pairs", len(ids))
-	
+
 	// Write the file
 	writer, err := NewWriter(tempFile)
 	if err != nil {
 		t.Fatalf("Failed to create writer: %v", err)
 	}
-	
+
 	// Write a block of data
 	if err := writer.WriteBlock(ids, values); err != nil {
 		t.Fatalf("Failed to write block: %v", err)
 	}
 	// Debug reader information
-	
+
 	// Finalize and close the file
 	if err := writer.FinalizeAndClose(); err != nil {
 		t.Fatalf("Failed to finalize file: %v", err)
 	}
-	
+
 	// Read the file and examine its structure
 	fileData, err := os.ReadFile(tempFile)
 	if err != nil {
 		t.Fatalf("Failed to read file: %v", err)
 	}
-	
+
 	// Analyze the overall structure
 	t.Logf("File size: %d bytes", len(fileData))
-	
+
 	// File Header (first 64 bytes)
 	fileHeader := fileData[:64]
 	dumpHex(t, "File Header (64 bytes)", fileHeader)
-	
+
 	// Extract key values from the header
 	magic := binary.LittleEndian.Uint64(fileHeader[0:8])
 	version := binary.LittleEndian.Uint32(fileHeader[8:12])
 	blockCount := binary.LittleEndian.Uint64(fileHeader[16:24])
 	t.Logf("Header values: magic=0x%X, version=%d, blockCount=%d", magic, version, blockCount)
-	
+
 	// Block Header (next 64 bytes)
 	if len(fileData) >= 128 {
 		blockHeader := fileData[64:128]
 		dumpHex(t, "Block Header (64 bytes)", blockHeader)
-		
+
 		// Extract key values from the block header
 		minID := binary.LittleEndian.Uint64(blockHeader[0:8])
 		maxID := binary.LittleEndian.Uint64(blockHeader[8:16])
@@ -456,12 +456,12 @@ func TestFileFormat(t *testing.T) {
 		t.Logf("Block header values: minID=%d, maxID=%d, minValue=%d, maxValue=%d, sum=%d, count=%d",
 			minID, maxID, minValue, maxValue, sum, count)
 	}
-	
+
 	// Block Layout (next 16 bytes)
 	if len(fileData) >= 144 {
 		blockLayout := fileData[128:144]
 		dumpHex(t, "Block Layout (16 bytes)", blockLayout)
-		
+
 		// Extract key values from the block layout
 		idSectionOffset := binary.LittleEndian.Uint32(blockLayout[0:4])
 		idSectionSize := binary.LittleEndian.Uint32(blockLayout[4:8])
@@ -470,7 +470,7 @@ func TestFileFormat(t *testing.T) {
 		t.Logf("Block layout values: idOffset=%d, idSize=%d, valueOffset=%d, valueSize=%d",
 			idSectionOffset, idSectionSize, valueSectionOffset, valueSectionSize)
 	}
-	
+
 	// Data Section
 	if len(fileData) >= 144 {
 		dataStart := 144
@@ -479,36 +479,36 @@ func TestFileFormat(t *testing.T) {
 			dumpHex(t, "Data Section", fileData[dataStart:dataStart+dataSize])
 		}
 	}
-	
+
 	// Footer (last part of the file)
 	if len(fileData) > 24 {
 		// Look at the last 24 bytes first (footer size, checksum, magic)
 		footerEnd := fileData[len(fileData)-24:]
 		dumpHex(t, "Footer End (24 bytes)", footerEnd)
-		
+
 		// Extract key values
 		footerSize := binary.LittleEndian.Uint64(footerEnd[0:8])
 		checksum := binary.LittleEndian.Uint64(footerEnd[8:16])
 		footerMagic := binary.LittleEndian.Uint64(footerEnd[16:24])
 		t.Logf("Footer end values: size=%d, checksum=0x%X, magic=0x%X", footerSize, checksum, footerMagic)
-		
+
 		// Calculate footer content start
 		footerContentStart := len(fileData) - 24 - int(footerSize)
 		if footerContentStart >= 0 && footerContentStart < len(fileData) {
-			footerContent := fileData[footerContentStart:len(fileData)-24]
+			footerContent := fileData[footerContentStart : len(fileData)-24]
 			dumpHex(t, fmt.Sprintf("Footer Content (%d bytes)", len(footerContent)), footerContent)
-			
+
 			// Try to interpret the footer content
 			if len(footerContent) >= 4 {
 				blockIndexCount := binary.LittleEndian.Uint32(footerContent[0:4])
 				t.Logf("Footer content: blockIndexCount=%d", blockIndexCount)
-				
+
 				// Check if we have at least one entry (blockOffset, blockSize, minID, maxID, minValue, maxValue, sum, count)
 				entrySize := 8 + 4 + 8 + 8 + 8 + 8 + 8 + 4 // 56 bytes
 				if len(footerContent) >= 4+entrySize {
 					entryStart := 4
-					blockOffset := binary.LittleEndian.Uint64(footerContent[entryStart:entryStart+8])
-					blockSize := binary.LittleEndian.Uint32(footerContent[entryStart+8:entryStart+12])
+					blockOffset := binary.LittleEndian.Uint64(footerContent[entryStart : entryStart+8])
+					blockSize := binary.LittleEndian.Uint32(footerContent[entryStart+8 : entryStart+12])
 					t.Logf("First footer entry: blockOffset=%d, blockSize=%d", blockOffset, blockSize)
 				}
 			}
@@ -644,35 +644,35 @@ func TestDeltaEncoding(t *testing.T) {
 	// Expected delta-encoded values
 	expectedEncodedIDs := []uint64{1000, 1, 1, 1, 1, 1, 1, 1, 1, 1}
 	expectedEncodedValues := []int64{5000, 10, 10, 10, 10, 10, 10, 10, 10, 10}
-	
+
 	// Verify delta encoding function works correctly
 	actualEncodedIDs := deltaEncode(ids)
 	actualEncodedValues := deltaEncodeInt64(values)
-	
+
 	// Check that our delta encoding functions work correctly
 	for i := range ids {
 		if actualEncodedIDs[i] != expectedEncodedIDs[i] {
-			t.Errorf("Delta encoding incorrect for ID at index %d: expected %d, got %d", 
+			t.Errorf("Delta encoding incorrect for ID at index %d: expected %d, got %d",
 				i, expectedEncodedIDs[i], actualEncodedIDs[i])
 		}
 		if actualEncodedValues[i] != expectedEncodedValues[i] {
-			t.Errorf("Delta encoding incorrect for value at index %d: expected %d, got %d", 
+			t.Errorf("Delta encoding incorrect for value at index %d: expected %d, got %d",
 				i, expectedEncodedValues[i], actualEncodedValues[i])
 		}
 	}
-	
+
 	// Verify delta decoding functions work too
 	decodedIDs := deltaDecode(actualEncodedIDs)
 	decodedValues := deltaDecodeInt64(actualEncodedValues)
-	
+
 	// Verify decoded values match the original data
 	for i := range ids {
 		if decodedIDs[i] != ids[i] {
-			t.Errorf("Delta decoding incorrect for ID at index %d: got %d, want %d", 
+			t.Errorf("Delta decoding incorrect for ID at index %d: got %d, want %d",
 				i, decodedIDs[i], ids[i])
 		}
 		if decodedValues[i] != values[i] {
-			t.Errorf("Delta decoding incorrect for value at index %d: got %d, want %d", 
+			t.Errorf("Delta decoding incorrect for value at index %d: got %d, want %d",
 				i, decodedValues[i], values[i])
 		}
 	}
@@ -693,6 +693,23 @@ func TestDeltaEncoding(t *testing.T) {
 		t.Fatalf("Failed to finalize file: %v", err)
 	}
 
+	// Get file size
+	fileInfo, err := os.Stat(tempFile)
+	if err != nil {
+		t.Fatalf("Failed to get file info: %v", err)
+	}
+	t.Logf("File size: %d bytes", fileInfo.Size())
+
+	// Dump the file content for debugging
+	fileData, err := os.ReadFile(tempFile)
+	if err != nil {
+		t.Fatalf("Failed to read file: %v", err)
+	}
+	t.Logf("File header (first 64 bytes): % x", fileData[:64])
+	t.Logf("Block header (next 64 bytes): % x", fileData[64:128])
+	t.Logf("Block layout (next 16 bytes): % x", fileData[128:144])
+	t.Logf("Data section (next 32 bytes): % x", fileData[144:176])
+
 	// Open the file for reading
 	reader, err := NewReader(tempFile)
 	if err != nil {
@@ -704,7 +721,7 @@ func TestDeltaEncoding(t *testing.T) {
 	if !reader.IsDeltaEncoded() {
 		t.Errorf("Expected delta encoding, but file is not delta encoded")
 	}
-	
+
 	if reader.EncodingType() != EncodingDeltaBoth {
 		t.Errorf("Expected encoding type %d, got %d", EncodingDeltaBoth, reader.EncodingType())
 	}
@@ -712,13 +729,13 @@ func TestDeltaEncoding(t *testing.T) {
 	// Read the data
 	var readIds []uint64
 	var readValues []int64
-	
+
 	var readErr error
 	readIds, readValues, readErr = reader.GetPairs(0)
 	if readErr != nil {
 		t.Fatalf("Failed to read pairs: %v", readErr)
 	}
-	
+
 	// Print debug info about what was read
 	t.Logf("Read %d IDs and %d values", len(readIds), len(readValues))
 	if len(readIds) > 0 {
@@ -727,7 +744,7 @@ func TestDeltaEncoding(t *testing.T) {
 	if len(readValues) > 0 {
 		t.Logf("First few values: %v", readValues[:min(5, len(readValues))])
 	}
-	
+
 	// Check data integrity
 	if len(readIds) != len(ids) {
 		t.Errorf("Expected %d IDs, got %d", len(ids), len(readIds))
@@ -759,28 +776,28 @@ func TestEncodingSpaceEfficiency(t *testing.T) {
 	// Using larger dataset to better demonstrate the difference
 	ids := make([]uint64, 1000)
 	values := make([]int64, 1000)
-	
+
 	// Generate sequential IDs and values with small deltas
 	for i := 0; i < 1000; i++ {
 		ids[i] = uint64(10000 + i)
 		values[i] = int64(50000 + (i * 10))
 	}
-	
+
 	// Directly test efficiency at the data level
-	rawIdsSize := len(ids) * 8   // 8 bytes per uint64
+	rawIdsSize := len(ids) * 8       // 8 bytes per uint64
 	rawValuesSize := len(values) * 8 // 8 bytes per int64
 	rawTotalSize := rawIdsSize + rawValuesSize
-	
+
 	// Delta encode the data
 	deltaEncodedIds := deltaEncode(ids)
 	deltaEncodedValues := deltaEncodeInt64(values)
-	
+
 	// In a real system with variable-length encoding, deltas would use fewer bytes,
 	// but since we're keeping the same fixed-size values, the memory size stays the same.
 	// However, we can evaluate the delta encoding by measuring how many entries are small/zero
 	idDeltasLessThan10 := 0
-	valueDeltasEqual10 := 0 
-	
+	valueDeltasEqual10 := 0
+
 	// Skip the first entry (it's stored as-is)
 	for i := 1; i < len(deltaEncodedIds); i++ {
 		if deltaEncodedIds[i] < 10 {
@@ -790,7 +807,7 @@ func TestEncodingSpaceEfficiency(t *testing.T) {
 			valueDeltasEqual10++
 		}
 	}
-	
+
 	// Verify the delta encoding produces predictable results
 	expectedSmallDeltas := len(ids) - 1 // all except the first one
 	if idDeltasLessThan10 != expectedSmallDeltas {
@@ -799,18 +816,18 @@ func TestEncodingSpaceEfficiency(t *testing.T) {
 	if valueDeltasEqual10 != expectedSmallDeltas {
 		t.Errorf("Expected %d value deltas of exactly 10, got %d", expectedSmallDeltas, valueDeltasEqual10)
 	}
-	
+
 	// Verify that delta encoding + variable length encoding would produce significant savings
 	// This is a simulated size calculation - in a real implementation, small integers would use fewer bytes
 	simulatedRawSize := rawTotalSize
-	simulatedDeltaSize := 8 + // First ID (8 bytes) 
-	                      8 + // First value (8 bytes)
-	                      (len(ids)-1) + // 1 byte per small ID delta 
-	                      (len(values)-1) // 1 byte per small value delta
-	
+	simulatedDeltaSize := 8 + // First ID (8 bytes)
+		8 + // First value (8 bytes)
+		(len(ids) - 1) + // 1 byte per small ID delta
+		(len(values) - 1) // 1 byte per small value delta
+
 	compressionRatio := float64(simulatedRawSize) / float64(simulatedDeltaSize)
 	t.Logf("With variable-length encoding, delta encoding would compress data by factor of %.1fx", compressionRatio)
-	
+
 	// We expect significant compression when variable-length encoding is used
 	if compressionRatio < 4.0 {
 		t.Errorf("Expected compression ratio of at least 4x with delta+variable encoding, got %.1fx", compressionRatio)
@@ -863,12 +880,12 @@ func TestEncodingSpaceEfficiency(t *testing.T) {
 	// would benefit from VLE. This test is just confirming the file format works.
 	// Suppress the error for now until we implement variable-length encoding too.
 	/*
-	if deltaSize >= rawSize {
-		t.Errorf("Delta encoding did not reduce file size as expected: delta=%d bytes, raw=%d bytes", 
-			deltaSize, rawSize)
-	}
+		if deltaSize >= rawSize {
+			t.Errorf("Delta encoding did not reduce file size as expected: delta=%d bytes, raw=%d bytes",
+				deltaSize, rawSize)
+		}
 	*/
-	t.Log("Note: Delta encoding with fixed-size integers doesn't reduce file size. Variable-length encoding is needed.") 
+	t.Log("Note: Delta encoding with fixed-size integers doesn't reduce file size. Variable-length encoding is needed.")
 
 	// Read both files and verify data is identical
 	rawReader, err := NewReader(rawFile)
@@ -882,26 +899,26 @@ func TestEncodingSpaceEfficiency(t *testing.T) {
 		t.Fatalf("Failed to open delta file: %v", err)
 	}
 	defer deltaReader.Close()
-	
+
 	var rawIds, deltaIds []uint64
 	var rawValues, deltaValues []int64
-	
+
 	rawIds, rawValues, err = rawReader.GetPairs(0)
 	if err != nil {
 		t.Fatalf("Failed to read raw pairs: %v", err)
 	}
-	
+
 	// Print debug info
 	t.Logf("Read %d raw IDs and %d raw values", len(rawIds), len(rawValues))
-	
+
 	deltaIds, deltaValues, err = deltaReader.GetPairs(0)
 	if err != nil {
 		t.Fatalf("Failed to read delta pairs: %v", err)
 	}
-	
+
 	// Print debug info
 	t.Logf("Read %d delta IDs and %d delta values", len(deltaIds), len(deltaValues))
-	
+
 	// Verify the data is the same regardless of encoding
 	if len(rawIds) != len(deltaIds) {
 		t.Errorf("ID count mismatch: raw=%d, delta=%d", len(rawIds), len(deltaIds))

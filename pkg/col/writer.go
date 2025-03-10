@@ -1,4 +1,3 @@
-// Package col implements a column-based storage format for id-value pairs.
 package col
 
 import (
@@ -7,6 +6,67 @@ import (
 	"io"
 	"os"
 )
+
+// BlockStats holds statistics for a block
+type BlockStats struct {
+	MinID    uint64
+	MaxID    uint64
+	MinValue int64
+	MaxValue int64
+	Sum      int64
+	Count    uint32
+}
+
+// calculateMinMaxUint64 calculates the minimum and maximum values in a uint64 slice
+func calculateMinMaxUint64(values []uint64) (min, max uint64) {
+	if len(values) == 0 {
+		return 0, 0
+	}
+
+	min = values[0]
+	max = values[0]
+
+	for _, v := range values {
+		if v < min {
+			min = v
+		}
+		if v > max {
+			max = v
+		}
+	}
+
+	return min, max
+}
+
+// calculateMinMaxInt64 calculates the minimum and maximum values in an int64 slice
+func calculateMinMaxInt64(values []int64) (min, max int64) {
+	if len(values) == 0 {
+		return 0, 0
+	}
+
+	min = values[0]
+	max = values[0]
+
+	for _, v := range values {
+		if v < min {
+			min = v
+		}
+		if v > max {
+			max = v
+		}
+	}
+
+	return min, max
+}
+
+// calculateSumInt64 calculates the sum of values in an int64 slice
+func calculateSumInt64(values []int64) int64 {
+	var sum int64
+	for _, v := range values {
+		sum += v
+	}
+	return sum
+}
 
 // WriterOption is a function that configures a Writer
 type WriterOption func(*Writer)
@@ -31,8 +91,9 @@ type Writer struct {
 	blockCount      uint64
 	encodingType    uint32
 	blockSizeTarget uint32
-	blockPositions  []uint64    // Position of each block in the file
-	blockSizes      []uint32    // Size of each block in bytes
+	blockPositions  []uint64     // Position of each block in the file
+	blockSizes      []uint32     // Size of each block in bytes
+	blockStats      []BlockStats // Statistics for each block
 }
 
 // NewWriter creates a new column file writer
@@ -45,10 +106,11 @@ func NewWriter(filename string, options ...WriterOption) (*Writer, error) {
 	writer := &Writer{
 		file:            file,
 		blockCount:      0,
-		encodingType:    EncodingRaw,  // Default
-		blockSizeTarget: 4 * 1024,     // 4KB default
+		encodingType:    EncodingRaw, // Default
+		blockSizeTarget: 4 * 1024,    // 4KB default
 		blockPositions:  make([]uint64, 0),
 		blockSizes:      make([]uint32, 0),
+		blockStats:      make([]BlockStats, 0),
 	}
 
 	// Apply options
@@ -116,40 +178,11 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 		return fmt.Errorf("cannot write empty block")
 	}
 
-	// Calculate block statistics
-	minID := ids[0]
-	maxID := ids[0]
-	minValue := values[0]
-	maxValue := values[0]
-	var sum int64 = 0
-	count := uint32(len(ids))
-
-	for i := 0; i < len(ids); i++ {
-		// Update min/max IDs
-		if ids[i] < minID {
-			minID = ids[i]
-		}
-		if ids[i] > maxID {
-			maxID = ids[i]
-		}
-
-		// Update min/max values
-		if values[i] < minValue {
-			minValue = values[i]
-		}
-		if values[i] > maxValue {
-			maxValue = values[i]
-		}
-
-		// Update sum
-		sum += values[i]
-	}
-
-	// Prepare data for writing based on encoding type
+	// Apply encoding based on the selected type
 	var encodedIDs []uint64
 	var encodedValues []int64
 	blockEncodingType := w.encodingType
-	
+
 	// Apply encoding based on the selected type
 	switch w.encodingType {
 	case EncodingRaw:
@@ -169,7 +202,7 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 		// but we need to keep track of the encoding type
 		encodedIDs = ids
 		encodedValues = values
-		
+
 		// For combined VarInt+Delta encoding
 		if w.encodingType == EncodingVarIntBoth {
 			encodedIDs = deltaEncode(ids)
@@ -182,94 +215,116 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 		blockEncodingType = EncodingRaw
 	}
 
-	// Remember the block start position (beginning of header)
+	// Calculate statistics for the block
+	minID, maxID := calculateMinMaxUint64(encodedIDs)
+	minValue, maxValue := calculateMinMaxInt64(encodedValues)
+	sum := calculateSumInt64(encodedValues)
+	count := uint32(len(encodedIDs))
+
+	// Write block header (64 bytes)
 	blockStart, err := w.file.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return fmt.Errorf("failed to get block start position: %w", err)
 	}
-	
+
 	// Store this position so we can refer to it later in the footer
 	w.blockPositions = append(w.blockPositions, uint64(blockStart))
 
-	// Create block header
-	blockHeader := NewBlockHeader(minID, maxID, minValue, maxValue, sum, count, blockEncodingType)
+	// Convert int64 values to uint64 for storage
+	minValueU64 := int64ToUint64(minValue)
+	maxValueU64 := int64ToUint64(maxValue)
+	sumU64 := int64ToUint64(sum)
 
-	// Write block header (64 bytes)
-	// Use direct buffer writing for type safety
-	headerBuf := make([]byte, 44) // 8+8+8+8+8+4 bytes
-	
-	// Write values into buffer with correct types
-	binary.LittleEndian.PutUint64(headerBuf[0:8], blockHeader.MinID)
-	binary.LittleEndian.PutUint64(headerBuf[8:16], blockHeader.MaxID)
-	binary.LittleEndian.PutUint64(headerBuf[16:24], blockHeader.MinValue)
-	binary.LittleEndian.PutUint64(headerBuf[24:32], blockHeader.MaxValue)
-	binary.LittleEndian.PutUint64(headerBuf[32:40], blockHeader.Sum)
-	
-	// Write the count field to the block header
-	binary.LittleEndian.PutUint32(headerBuf[40:44], blockHeader.Count)
-	
-	// Write the buffer to the file
-	if _, err := w.file.Write(headerBuf); err != nil {
-		return fmt.Errorf("failed to write block header: %w", err)
+	// Write block header fields
+	if err := binary.Write(w.file, binary.LittleEndian, minID); err != nil {
+		return fmt.Errorf("failed to write min ID: %w", err)
 	}
-	
-	if err := binary.Write(w.file, binary.LittleEndian, blockHeader.EncodingType); err != nil {
+	if err := binary.Write(w.file, binary.LittleEndian, maxID); err != nil {
+		return fmt.Errorf("failed to write max ID: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, minValueU64); err != nil {
+		return fmt.Errorf("failed to write min value: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, maxValueU64); err != nil {
+		return fmt.Errorf("failed to write max value: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, sumU64); err != nil {
+		return fmt.Errorf("failed to write sum: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, count); err != nil {
+		return fmt.Errorf("failed to write count: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, blockEncodingType); err != nil {
 		return fmt.Errorf("failed to write encoding type: %w", err)
 	}
-	if err := binary.Write(w.file, binary.LittleEndian, blockHeader.CompressionType); err != nil {
+	if err := binary.Write(w.file, binary.LittleEndian, uint32(CompressionNone)); err != nil {
 		return fmt.Errorf("failed to write compression type: %w", err)
 	}
 
-	// Determine if we need to use variable-length encoding
-	useVarIntForIDs := blockEncodingType == EncodingVarInt || 
-	                   blockEncodingType == EncodingVarIntID || 
-	                   blockEncodingType == EncodingVarIntBoth
-	useVarIntForValues := blockEncodingType == EncodingVarInt || 
-	                      blockEncodingType == EncodingVarIntValue || 
-	                      blockEncodingType == EncodingVarIntBoth
-
-	// Calculate section sizes - these will vary if using varint encoding
-	var idSectionSize uint32
-	var valueSectionSize uint32
-	
 	// Calculate sizes based on encoding
 	// For varInt encoding, we need to precompute the encoded values array
 	// so we know the exact size
 	var encodedIdBytes [][]byte
 	var encodedValueBytes [][]byte
-	
+	var idSectionSize uint32
+	var valueSectionSize uint32
+
+	// Determine if we need to use variable-length encoding
+	useVarIntForIDs := blockEncodingType == EncodingVarInt ||
+		blockEncodingType == EncodingVarIntID ||
+		blockEncodingType == EncodingVarIntBoth
+	useVarIntForValues := blockEncodingType == EncodingVarInt ||
+		blockEncodingType == EncodingVarIntValue ||
+		blockEncodingType == EncodingVarIntBoth
+
 	if useVarIntForIDs {
 		// Precompute the encoded bytes for each ID
 		encodedIdBytes = make([][]byte, len(encodedIDs))
 		idSectionSize = 0
-		
+
+		// Debug output
+		fmt.Printf("Encoding %d IDs with variable-length encoding\n", len(encodedIDs))
+
 		for i, id := range encodedIDs {
 			// Encode this ID as varint
 			encodedIdBytes[i] = encodeVarInt(id)
 			// Add the size of this encoded ID
 			idSize := uint32(len(encodedIdBytes[i]))
-			
+
 			if idSize == 0 {
 				// This should never happen - a minimum of 1 byte is needed for varint
 				return fmt.Errorf("encoded size of ID at index %d is 0", i)
 			}
 			idSectionSize += idSize
+
+			// Debug output for first few and last few IDs
+			if i < 5 || i > len(encodedIDs)-5 {
+				fmt.Printf("ID[%d]: %d, encoded size: %d bytes, running total: %d\n",
+					i, id, idSize, idSectionSize)
+			}
 		}
 		// Sanity check
 		if idSectionSize == 0 && len(encodedIDs) > 0 {
 			// Should never happen if the loop ran properly
 			return fmt.Errorf("calculated ID section size is 0 with %d IDs", len(encodedIDs))
 		}
-		
+
+		// Debug output
+		fmt.Printf("Total ID section size: %d bytes for %d IDs\n", idSectionSize, len(encodedIDs))
+
 	} else {
 		// Fixed 8 bytes per ID
 		idSectionSize = uint32(count * 8)
 	}
-	
+
 	if useVarIntForValues {
 		// Precompute the encoded bytes for each value
 		encodedValueBytes = make([][]byte, len(encodedValues))
 		valueSectionSize = 0
+
+		// Debug output
+		fmt.Printf("Encoding %d values with variable-length encoding\n", len(encodedValues))
+
 		for i, val := range encodedValues {
 			// Encode this value as signed varint
 			encodedValueBytes[i] = encodeSignedVarInt(val)
@@ -280,35 +335,55 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 				return fmt.Errorf("encoded size of value at index %d is 0", i)
 			}
 			valueSectionSize += valSize
+
+			// Debug output for first few and last few values
+			if i < 5 || i > len(encodedValues)-5 {
+				fmt.Printf("Value[%d]: %d, encoded size: %d bytes, running total: %d\n",
+					i, val, valSize, valueSectionSize)
+			}
 		}
 		// Sanity check
 		if valueSectionSize == 0 && len(encodedValues) > 0 {
 			// Should never happen if the loop ran properly
 			return fmt.Errorf("calculated value section size is 0 with %d values", len(encodedValues))
 		}
+
+		// Debug output
+		fmt.Printf("Total value section size: %d bytes for %d values\n", valueSectionSize, len(encodedValues))
 	} else {
 		// Fixed 8 bytes per value
 		valueSectionSize = uint32(count * 8)
 	}
-	
+
 	// Calculate total data size
 	dataSize := idSectionSize + valueSectionSize
-	
-	if err := binary.Write(w.file, binary.LittleEndian, dataSize); err != nil {
+	_ = dataSize // Used for debugging, can be removed in production
+
+	// Use the updated CalculateBlockSize function
+	uncompressedSize := CalculateBlockSize(count, blockEncodingType)
+	compressedSize := uncompressedSize // Same as uncompressed for now
+
+	if err := binary.Write(w.file, binary.LittleEndian, uncompressedSize); err != nil {
 		return fmt.Errorf("failed to write uncompressed size: %w", err)
 	}
-	if err := binary.Write(w.file, binary.LittleEndian, dataSize); err != nil {
+	if err := binary.Write(w.file, binary.LittleEndian, compressedSize); err != nil {
 		return fmt.Errorf("failed to write compressed size: %w", err)
 	}
+
+	// Write checksum placeholder (will be updated later)
+	checksumPos, err := w.file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return fmt.Errorf("failed to get checksum position: %w", err)
+	}
+	_ = checksumPos // Used for checksum calculation, can be removed in production
 	if err := binary.Write(w.file, binary.LittleEndian, uint64(0)); err != nil {
 		return fmt.Errorf("failed to write checksum: %w", err)
 	}
 
-	// Write reserved space to fill up to 64 bytes
-	// 44 (header) + 4 (encoding) + 4 (compression) + 4 (uncompressed size) 
-	// + 4 (compressed size) + 8 (checksum) = 68 bytes
-	// The header is already slightly larger than 64 bytes in our implementation
-	// We'll skip the reserved space since we're already over 64 bytes
+	// Skip reserved bytes (8 bytes)
+	if _, err := w.file.Seek(8, io.SeekCurrent); err != nil {
+		return fmt.Errorf("failed to skip reserved bytes: %w", err)
+	}
 
 	// Write the block layout section (16 bytes)
 	// The section layout according to spec:
@@ -316,49 +391,53 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	// 2. ID section size in bytes
 	// 3. Value section offset (from start of data section)
 	// 4. Value section size in bytes
-	
-	// Create a layout buffer and fill it directly
-	layoutBuf := make([]byte, 16)
-	
+
 	// Validate section sizes
 	if idSectionSize == 0 {
 		return fmt.Errorf("ID section size is 0, which is invalid. useVarIntForIDs=%v, count=%d",
 			useVarIntForIDs, count)
 	}
-	
-	// Per spec section 4.2:
-	// - ID section comes first after the 4-byte size header in the data section
-	// - Value section follows the ID section
-	
-	// Use the binary package to properly write integers - using the layout from spec 4.2
-	idSectionOffset := uint32(4) // 4 bytes for size header
-	valueSectionOffset := idSectionOffset + idSectionSize
-	
-	binary.LittleEndian.PutUint32(layoutBuf[0:4], idSectionOffset) // ID Section Offset (after 4-byte size header)
-	binary.LittleEndian.PutUint32(layoutBuf[4:8], idSectionSize) // ID Section Size
-	binary.LittleEndian.PutUint32(layoutBuf[8:12], valueSectionOffset) // Value Section Offset (ID offset + ID size)
-	binary.LittleEndian.PutUint32(layoutBuf[12:16], valueSectionSize) // Value Section Size
-	
-	
-	// Write the layout buffer to file
-	if _, err := w.file.Write(layoutBuf); err != nil {
-		return fmt.Errorf("failed to write block layout: %w", err)
-	}
-	
-	// Ensure data is written to disk
-	if err := w.file.Sync(); err != nil {
-		return fmt.Errorf("failed to sync file: %w", err)
+
+	if valueSectionSize == 0 {
+		return fmt.Errorf("Value section size is 0, which is invalid. useVarIntForValues=%v, count=%d",
+			useVarIntForValues, count)
 	}
 
-	// Write block data
-	// Get current position at the start of data section (for debugging)
-	_, _ = w.file.Seek(0, io.SeekCurrent)
-	
-	// Write the data section size (4 bytes)
-	if err := binary.Write(w.file, binary.LittleEndian, uint32(dataSize)); err != nil {
-		return fmt.Errorf("failed to write data section size: %w", err)
+	// Per spec section 4.2:
+	// - ID section comes first in the data section
+	// - Value section follows the ID section
+	// The offsets are relative to the end of the block header (after the 16-byte layout section)
+	idSectionOffset := uint32(0)
+	valueSectionOffset := idSectionSize
+
+	// Create a layout buffer and fill it
+	layoutBuf := make([]byte, 16)
+	binary.LittleEndian.PutUint32(layoutBuf[0:4], idSectionOffset)
+	binary.LittleEndian.PutUint32(layoutBuf[4:8], idSectionSize)
+	binary.LittleEndian.PutUint32(layoutBuf[8:12], valueSectionOffset)
+	binary.LittleEndian.PutUint32(layoutBuf[12:16], valueSectionSize)
+
+	// Debug output for layout
+	fmt.Printf("Writing block layout: idOffset=%d, idSectionSize=%d, valOffset=%d, valueSectionSize=%d, count=%d\n",
+		idSectionOffset, idSectionSize, valueSectionOffset, valueSectionSize, count)
+
+	// Write the layout buffer to file
+	bytesWritten, err := w.file.Write(layoutBuf)
+	if err != nil {
+		return fmt.Errorf("failed to write block layout: %w", err)
 	}
-	
+	if bytesWritten != 16 {
+		return fmt.Errorf("failed to write block layout: wrote %d bytes, expected 16", bytesWritten)
+	}
+
+	// Start of data section - record position for checksum calculation
+	dataStart, err := w.file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return fmt.Errorf("failed to get data section position: %w", err)
+	}
+	_ = dataStart // Used for checksum calculation, can be removed in production
+
+	// Write block data
 	// Write ID array based on encoding type
 	if useVarIntForIDs {
 		// Use variable-length encoding for IDs (using precomputed values)
@@ -376,7 +455,7 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 			}
 		}
 	}
-	
+
 	// Write Value array based on encoding type
 	if useVarIntForValues {
 		// Use variable-length encoding for values (using precomputed values)
@@ -394,25 +473,35 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 			}
 		}
 	}
-	
+
 	// Get end position to calculate block size
 	blockEnd, err := w.file.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return fmt.Errorf("failed to get block end position: %w", err)
 	}
-	
-	// Store the total block size
+
+	// Calculate actual block size
 	blockSize := uint32(blockEnd - blockStart)
 	w.blockSizes = append(w.blockSizes, blockSize)
-	
-	// Update block count
+
+	// Store block statistics for footer
+	w.blockStats = append(w.blockStats, BlockStats{
+		MinID:    minID,
+		MaxID:    maxID,
+		MinValue: minValue,
+		MaxValue: maxValue,
+		Sum:      sum,
+		Count:    count,
+	})
+
+	// Increment block count
 	w.blockCount++
-	
+
 	// Sync to disk to ensure data consistency
 	if err := w.file.Sync(); err != nil {
 		return fmt.Errorf("failed to sync file: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -430,10 +519,10 @@ func (w *Writer) Finalize() error {
 	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("failed to seek to start: %w", err)
 	}
-	
+
 	// Create updated header
 	header := NewFileHeader(w.blockCount, w.blockSizeTarget, w.encodingType)
-	
+
 	// Write header
 	if err := binary.Write(w.file, binary.LittleEndian, header.Magic); err != nil {
 		return fmt.Errorf("failed to write magic number: %w", err)
@@ -448,48 +537,48 @@ func (w *Writer) Finalize() error {
 		return fmt.Errorf("failed to write block count: %w", err)
 	}
 	// Skip the rest of the header - unchanged fields
-	
+
 	// Seek to the end to write the footer
 	if _, err := w.file.Seek(0, io.SeekEnd); err != nil {
 		return fmt.Errorf("failed to seek to end: %w", err)
 	}
-	
+
 	// Get current position - start of footer
 	footerStart, err := w.file.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return fmt.Errorf("failed to get file position: %w", err)
 	}
-	
+
 	// Write block index count
 	if err := binary.Write(w.file, binary.LittleEndian, uint32(w.blockCount)); err != nil {
 		return fmt.Errorf("failed to write block index count: %w", err)
 	}
-	
+
 	// Only write block info if we have any blocks
 	if w.blockCount > 0 {
 		// Check that we have block positions for all blocks
 		if len(w.blockPositions) != int(w.blockCount) {
-			return fmt.Errorf("block position tracking error: expected %d positions, got %d", 
+			return fmt.Errorf("block position tracking error: expected %d positions, got %d",
 				w.blockCount, len(w.blockPositions))
 		}
-		
+
 		// Process each block
 		for blockIdx := uint64(0); blockIdx < w.blockCount; blockIdx++ {
-			// Get position and size for this block
 			blockOffset := w.blockPositions[blockIdx]
 			blockSize := w.blockSizes[blockIdx]
-			
+			_ = w.blockStats[blockIdx] // Used for debugging, can be removed in production
+
 			// Seek to the block header
 			if _, err := w.file.Seek(int64(blockOffset), io.SeekStart); err != nil {
-				return fmt.Errorf("failed to seek to block %d header: %w", blockIdx, err)
+				return fmt.Errorf("failed to seek to block: %w", err)
 			}
-			
+
 			// Read block header (just enough to get the metadata we need)
 			headerBuf := make([]byte, 44)
 			if _, err := io.ReadFull(w.file, headerBuf); err != nil {
 				return fmt.Errorf("failed to read block %d header: %w", blockIdx, err)
 			}
-			
+
 			// Parse header fields
 			minID := binary.LittleEndian.Uint64(headerBuf[0:8])
 			maxID := binary.LittleEndian.Uint64(headerBuf[8:16])
@@ -497,17 +586,17 @@ func (w *Writer) Finalize() error {
 			maxValueU64 := binary.LittleEndian.Uint64(headerBuf[24:32])
 			sumU64 := binary.LittleEndian.Uint64(headerBuf[32:40])
 			count := binary.LittleEndian.Uint32(headerBuf[40:44])
-			
+
 			// Convert values to proper types
 			minValue := uint64ToInt64(minValueU64)
 			maxValue := uint64ToInt64(maxValueU64)
 			sum := uint64ToInt64(sumU64)
-			
+
 			// Seek back to footer
 			if _, err := w.file.Seek(0, io.SeekEnd); err != nil {
 				return fmt.Errorf("failed to seek to end: %w", err)
 			}
-			
+
 			// Create footer entry
 			entry := NewFooterEntry(
 				blockOffset,
@@ -516,7 +605,7 @@ func (w *Writer) Finalize() error {
 				minValue, maxValue, sum,
 				count,
 			)
-			
+
 			// Write entry to footer
 			if err := binary.Write(w.file, binary.LittleEndian, entry.BlockOffset); err != nil {
 				return fmt.Errorf("failed to write block offset: %w", err)
@@ -544,16 +633,16 @@ func (w *Writer) Finalize() error {
 			}
 		}
 	}
-	
+
 	// Get current position - end of footer content
 	footerEnd, err := w.file.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return fmt.Errorf("failed to get file position: %w", err)
 	}
-	
+
 	// Calculate footer size
 	footerSize := footerEnd - footerStart
-	
+
 	// Write footer metadata
 	if err := binary.Write(w.file, binary.LittleEndian, uint64(footerSize)); err != nil {
 		return fmt.Errorf("failed to write footer size: %w", err)
@@ -564,12 +653,12 @@ func (w *Writer) Finalize() error {
 	if err := binary.Write(w.file, binary.LittleEndian, MagicNumber); err != nil {
 		return fmt.Errorf("failed to write magic number: %w", err)
 	}
-	
+
 	// Final sync to ensure everything is written to disk
 	if err := w.file.Sync(); err != nil {
 		return fmt.Errorf("failed to sync file during finalization: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -584,37 +673,37 @@ func calculateBlockPositions(fileSize int64, blockCount uint64) []uint64 {
 	if blockCount == 0 {
 		return []uint64{}
 	}
-	
+
 	// For simplicity, we'll calculate fixed-size blocks
 	// First block always starts at offset 64 (right after the header)
 	positions := make([]uint64, blockCount)
 	positions[0] = 64
-	
+
 	if blockCount == 1 {
 		return positions
 	}
-	
+
 	// For multi-block files, we need to estimate the block size
 	// Based on our format, each block has:
 	// - 64 bytes for header
 	// - 16 bytes for layout
 	// - Data (id-value pairs, 16 bytes each)
-	
+
 	// First, get a conservative estimate of data entry count
 	// Assuming each block has 100 entries (our test case)
 	const estimatedEntriesPerBlock = 100
 	const bytesPerEntry = 16 // 8 bytes per ID, 8 bytes per value
-	
+
 	// Size of each block: header + layout + data
 	const blockHeaderAndLayoutSize = 64 + 16
 	const estimatedBlockDataSize = estimatedEntriesPerBlock * bytesPerEntry
 	const estimatedBlockSize = blockHeaderAndLayoutSize + estimatedBlockDataSize
-	
+
 	// Calculate positions for each block
 	for i := uint64(1); i < blockCount; i++ {
 		// Each block starts after the previous block
 		positions[i] = positions[i-1] + estimatedBlockSize
 	}
-	
+
 	return positions
 }

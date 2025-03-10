@@ -129,8 +129,8 @@ func NewBlockHeader(
 		Count:            count,
 		EncodingType:     encodingType,
 		CompressionType:  CompressionNone,
-		UncompressedSize: CalculateBlockSize(count),
-		CompressedSize:   CalculateBlockSize(count), // Same as uncompressed for now
+		UncompressedSize: CalculateBlockSize(count, encodingType),
+		CompressedSize:   CalculateBlockSize(count, encodingType), // Same as uncompressed for now
 		Checksum:         0,                         // Not implemented yet
 	}
 }
@@ -161,10 +161,33 @@ func NewFooterEntry(
 }
 
 // CalculateBlockSize calculates the size of a block based on the number of entries
-func CalculateBlockSize(count uint32) uint32 {
+// and encoding type. For variable-length encoding, this returns an estimate.
+func CalculateBlockSize(count uint32, encodingType uint32) uint32 {
 	// 64 bytes for block header
 	// 16 bytes for block layout
-	// count*8 bytes for IDs
-	// count*8 bytes for values
-	return 64 + 16 + (count * 8 * 2)
+	
+	// For variable-length encoding, estimate the size
+	isVarInt := encodingType == EncodingVarInt || 
+				encodingType == EncodingVarIntID || 
+				encodingType == EncodingVarIntValue || 
+				encodingType == EncodingVarIntBoth
+	
+	if isVarInt {
+		// For variable-length encoding, estimate based on average bytes per value
+		// Assume average of 2 bytes per value for small numbers (conservative estimate)
+		idSize := uint32(count * 2)
+		valueSize := uint32(count * 2)
+		
+		// If only IDs or only values use varint, adjust accordingly
+		if encodingType == EncodingVarIntID {
+			valueSize = count * 8 // Values still use fixed 8 bytes
+		} else if encodingType == EncodingVarIntValue {
+			idSize = count * 8 // IDs still use fixed 8 bytes
+		}
+		
+		return 64 + 16 + idSize + valueSize
+	}
+	
+	// For fixed-width encoding, exact calculation
+	return 64 + 16 + (count * 8 * 2) // 8 bytes per ID and 8 bytes per value
 }

@@ -54,16 +54,16 @@ func TestCalculateBlockSize(t *testing.T) {
 		count    uint32
 		expected uint32
 	}{
-		{0, 64 + 16}, // Header + layout, but no data
-		{1, 64 + 16 + 16}, // Header + layout + 16 bytes (one ID-value pair)
-		{10, 64 + 16 + 160}, // Header + layout + 160 bytes (10 pairs)
+		{0, 64 + 16 + 0},        // Header + layout + 0 bytes (empty)
+		{1, 64 + 16 + 16},       // Header + layout + 16 bytes (1 pair)
+		{10, 64 + 16 + 160},     // Header + layout + 160 bytes (10 pairs)
 		{1000, 64 + 16 + 16000}, // Header + layout + 16000 bytes (1000 pairs)
 	}
 
 	for _, tc := range testCases {
-		result := CalculateBlockSize(tc.count)
+		result := CalculateBlockSize(tc.count, EncodingRaw)
 		if result != tc.expected {
-			t.Errorf("CalculateBlockSize(%d) = %d, expected %d", tc.count, result, tc.expected)
+			t.Errorf("CalculateBlockSize(%d, EncodingRaw) = %d, expected %d", tc.count, result, tc.expected)
 		}
 	}
 }
@@ -109,7 +109,7 @@ func TestNewBlockHeader(t *testing.T) {
 		t.Errorf("Expected CompressionType %d, got %d", CompressionNone, header.CompressionType)
 	}
 
-	expectedSize := CalculateBlockSize(count)
+	expectedSize := CalculateBlockSize(count, encodingType)
 	if header.UncompressedSize != expectedSize {
 		t.Errorf("Expected UncompressedSize %d, got %d", expectedSize, header.UncompressedSize)
 	}
