@@ -209,9 +209,9 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	}
 
 	// Calculate sizes - 8 bytes per ID and value
-	idSectionSize := uint32(count * 8)
-	valueSectionSize := uint32(count * 8)
-	dataSize := idSectionSize + valueSectionSize
+	idSectionSize := uint32(count * 8) // Each ID is 8 bytes
+	valueSectionSize := uint32(count * 8) // Each value is 8 bytes
+	dataSize := idSectionSize + valueSectionSize // Total data size
 	
 	if err := binary.Write(w.file, binary.LittleEndian, dataSize); err != nil {
 		return fmt.Errorf("failed to write uncompressed size: %w", err)
@@ -229,22 +229,57 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	// The header is already slightly larger than 64 bytes in our implementation
 	// We'll skip the reserved space since we're already over 64 bytes
 
-	// Write block data layout (16 bytes)
-	// Avoid redeclaring variables
-	idOffset := uint32(0)
+	// Write the block layout section (16 bytes)
+	// The section layout is:
+	// 1. ID section offset (from start of data)
+	// 2. ID section size in bytes
+	// 3. Value section offset (from start of data)
+	// 4. Value section size in bytes
+	
+	// Create a layout buffer and fill it directly
+	layoutBuf := make([]byte, 16)
+	
+	// Set up the layout section properly
+	// IDs come first, so offset is 0
+	idSectionOffset := uint32(0)
+	// Values come after IDs
 	valueSectionOffset := idSectionSize
 	
-	if err := binary.Write(w.file, binary.LittleEndian, idOffset); err != nil { // ID section offset
-		return fmt.Errorf("failed to write ID section offset: %w", err)
+	// Very important: Actually write the sizes and offsets correctly
+	// Let's use direct byte operations instead of the binary package
+	
+	// ID section offset (bytes 0-3)
+	layoutBuf[0] = byte(idSectionOffset & 0xFF)
+	layoutBuf[1] = byte((idSectionOffset >> 8) & 0xFF)
+	layoutBuf[2] = byte((idSectionOffset >> 16) & 0xFF)
+	layoutBuf[3] = byte((idSectionOffset >> 24) & 0xFF)
+	
+	// ID section size (bytes 4-7)
+	layoutBuf[4] = byte(idSectionSize & 0xFF)
+	layoutBuf[5] = byte((idSectionSize >> 8) & 0xFF)
+	layoutBuf[6] = byte((idSectionSize >> 16) & 0xFF)
+	layoutBuf[7] = byte((idSectionSize >> 24) & 0xFF)
+	
+	// Value section offset (bytes 8-11)
+	layoutBuf[8] = byte(valueSectionOffset & 0xFF)
+	layoutBuf[9] = byte((valueSectionOffset >> 8) & 0xFF)
+	layoutBuf[10] = byte((valueSectionOffset >> 16) & 0xFF)
+	layoutBuf[11] = byte((valueSectionOffset >> 24) & 0xFF)
+	
+	// Value section size (bytes 12-15)
+	layoutBuf[12] = byte(valueSectionSize & 0xFF)
+	layoutBuf[13] = byte((valueSectionSize >> 8) & 0xFF)
+	layoutBuf[14] = byte((valueSectionSize >> 16) & 0xFF)
+	layoutBuf[15] = byte((valueSectionSize >> 24) & 0xFF)
+	
+	// Write the layout buffer to file
+	if _, err := w.file.Write(layoutBuf); err != nil {
+		return fmt.Errorf("failed to write block layout: %w", err)
 	}
-	if err := binary.Write(w.file, binary.LittleEndian, idSectionSize); err != nil { // ID section size
-		return fmt.Errorf("failed to write ID section size: %w", err)
-	}
-	if err := binary.Write(w.file, binary.LittleEndian, valueSectionOffset); err != nil { // Value section offset
-		return fmt.Errorf("failed to write value section offset: %w", err)
-	}
-	if err := binary.Write(w.file, binary.LittleEndian, valueSectionSize); err != nil { // Value section size
-		return fmt.Errorf("failed to write value section size: %w", err)
+	
+	// Ensure data is written to disk
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("failed to sync file: %w", err)
 	}
 
 	// Write block data
@@ -275,6 +310,11 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	
 	// Update block count
 	w.blockCount++
+	
+	// Sync to disk to ensure data consistency
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("failed to sync file: %w", err)
+	}
 	
 	return nil
 }
@@ -426,6 +466,11 @@ func (w *Writer) Finalize() error {
 	}
 	if err := binary.Write(w.file, binary.LittleEndian, MagicNumber); err != nil {
 		return fmt.Errorf("failed to write magic number: %w", err)
+	}
+	
+	// Final sync to ensure everything is written to disk
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("failed to sync file during finalization: %w", err)
 	}
 	
 	return nil

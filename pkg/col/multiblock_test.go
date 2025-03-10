@@ -1,6 +1,7 @@
 package col
 
 import (
+	"encoding/binary"
 	"os"
 	"testing"
 )
@@ -27,6 +28,9 @@ func TestDiagnoseMultiBlockIssue(t *testing.T) {
 	t.Logf("Test data: IDs from %d to %d, Values from %d to %d",
 		ids[0], ids[numEntries-1], values[0], values[numEntries-1])
 
+	// Delete any existing test file to ensure we're starting fresh
+	os.Remove(tempFile)
+	
 	// Create writer
 	writer, err := NewWriter(tempFile)
 	if err != nil {
@@ -62,6 +66,82 @@ func TestDiagnoseMultiBlockIssue(t *testing.T) {
 		t.Fatalf("Failed to get file info: %v", err)
 	}
 	t.Logf("File size: %d bytes", fileInfo.Size())
+	
+	// Get raw file bytes for inspection
+	fileData, err := os.ReadFile(tempFile)
+	if err != nil {
+		t.Fatalf("Failed to read file data: %v", err)
+	}
+	
+	// Inspect the file header and first block's layout
+	if len(fileData) >= 100 {
+		t.Logf("File header: % x", fileData[0:64])
+		
+		// Look at the actual header values
+		blockCount := binary.LittleEndian.Uint64(fileData[16:24])
+		t.Logf("Header shows block count = %d", blockCount)
+		
+		// Examine first block header
+		const blockHeaderSize = 64
+		const blockHeaderStart = 64 // First block starts after file header
+		
+		t.Logf("First block header: % x", fileData[blockHeaderStart:blockHeaderStart+blockHeaderSize])
+		
+		// Extract important values from block header
+		minID := binary.LittleEndian.Uint64(fileData[blockHeaderStart:blockHeaderStart+8])
+		maxID := binary.LittleEndian.Uint64(fileData[blockHeaderStart+8:blockHeaderStart+16])
+		count := binary.LittleEndian.Uint32(fileData[blockHeaderStart+40:blockHeaderStart+44])
+		encodingType := binary.LittleEndian.Uint32(fileData[blockHeaderStart+44:blockHeaderStart+48])
+		
+		t.Logf("First block: minID=%d, maxID=%d, count=%d, encoding=%d", 
+			minID, maxID, count, encodingType)
+		
+		// Check block layout
+		const layoutOffset = blockHeaderStart + blockHeaderSize
+		const layoutSize = 16
+		
+		if len(fileData) >= int(layoutOffset + layoutSize) {
+			layoutBytes := fileData[layoutOffset:layoutOffset+layoutSize]
+			t.Logf("Layout section (raw bytes): % x", layoutBytes)
+			
+			idOffset := binary.LittleEndian.Uint32(layoutBytes[0:4])
+			idSize := binary.LittleEndian.Uint32(layoutBytes[4:8])
+			valueOffset := binary.LittleEndian.Uint32(layoutBytes[8:12])
+			valueSize := binary.LittleEndian.Uint32(layoutBytes[12:16])
+			
+			t.Logf("First block layout: idOffset=%d, idSize=%d, valueOffset=%d, valueSize=%d",
+				idOffset, idSize, valueOffset, valueSize)
+			
+			// We expect idSize to be count*8 (8 bytes per ID)
+			expectedIdSize := count * 8
+			if idSize != expectedIdSize {
+				t.Logf("WARNING: idSize=%d doesn't match expected size=%d (count=%d * 8)", 
+					idSize, expectedIdSize, count)
+			}
+			
+			// Print the first few data bytes
+			dataStartIdx := int(layoutOffset + layoutSize)
+			dataEndIdx := dataStartIdx + 32
+			if dataEndIdx > len(fileData) {
+				dataEndIdx = len(fileData)
+			}
+			
+			t.Logf("First bytes of data section (after layout): % x", fileData[dataStartIdx:dataEndIdx])
+			
+			// Calculate where IDs and values should be
+			idStartIdx := dataStartIdx + int(idOffset)
+			valueStartIdx := dataStartIdx + int(valueOffset)
+			
+			// Show first few bytes of ID and value sections
+			if idStartIdx+16 <= len(fileData) {
+				t.Logf("First few bytes of ID section: % x", fileData[idStartIdx:idStartIdx+16])
+			}
+			
+			if valueStartIdx+16 <= len(fileData) {
+				t.Logf("First few bytes of value section: % x", fileData[valueStartIdx:valueStartIdx+16])
+			}
+		}
+	}
 	
 	// Try to read the file
 	reader, err := NewReader(tempFile)

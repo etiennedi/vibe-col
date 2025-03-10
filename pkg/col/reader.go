@@ -192,25 +192,18 @@ func (r *Reader) readBlock(blockIdx uint64) ([]uint64, []int64, BlockHeader, uin
 
 	// Get block information from footer index
 	var blockOffset uint64
-	var blockSize uint32
-	var count uint32
 
 	// If we have block index information, use it
 	if blockIdx < uint64(len(r.blockIndex)) {
 		blockOffset = r.blockIndex[blockIdx].BlockOffset
-		blockSize = r.blockIndex[blockIdx].BlockSize
-		count = r.blockIndex[blockIdx].Count
 	} else {
 		// Otherwise, calculate based on the file layout
 		if blockIdx == 0 {
-			blockOffset = 64 // First block starts right after the header
+			blockOffset = 64 // First block starts after file header
 		} else {
 			// The calculation would be more complex for multiple blocks
 			return nil, nil, BlockHeader{}, 0, fmt.Errorf("cannot calculate offset for block: %d", blockIdx)
 		}
-		
-		// Conservative size estimation - we don't know the size from the index
-		blockSize = 64 + 16 + (10 * 8 * 2) // header + layout + estimated data (10 pairs)
 	}
 
 	// Seek to the block
@@ -235,7 +228,7 @@ func (r *Reader) readBlock(blockIdx uint64) ([]uint64, []int64, BlockHeader, uin
 	header.EncodingType = binary.LittleEndian.Uint32(headerBuf[44:48])
 	header.CompressionType = binary.LittleEndian.Uint32(headerBuf[48:52])
 	header.UncompressedSize = binary.LittleEndian.Uint32(headerBuf[52:56])
-	if len(headerBuf) >= 64 {
+	if len(headerBuf) >= 60 {
 		header.CompressedSize = binary.LittleEndian.Uint32(headerBuf[56:60])
 		// The checksum might start at offset 60, but ensure we don't exceed buffer size
 		if len(headerBuf) >= 68 {
@@ -243,74 +236,42 @@ func (r *Reader) readBlock(blockIdx uint64) ([]uint64, []int64, BlockHeader, uin
 		}
 	}
 
-	// Try to infer the correct count if there's a mismatch
-	blockHeaderCount := header.Count
-	blockFooterCount := count
+	// Use the block count from header
+	blockCount := header.Count
 
-	// Use block header count if valid, otherwise use footer count
-	var blockCount uint32
-	if blockHeaderCount > 0 && blockHeaderCount < 1000000 { // Sanity check
-		blockCount = blockHeaderCount
-	} else if blockFooterCount > 0 && blockFooterCount < 1000000 {
-		blockCount = blockFooterCount
-	} else if len(r.blockIndex) > 0 && blockIdx < uint64(len(r.blockIndex)) {
-		// Use footer info if possible
-		blockCount = r.blockIndex[blockIdx].Count
-	} else {
-		// Estimate from the block size
-		// Block size = header (64) + layout (16) + data (count * 16)
-		// So count = (blockSize - 64 - 16) / 16
-		estimatedCount := (blockSize - 64 - 16) / 16
-		blockCount = estimatedCount
+	// Read block layout section (16 bytes)
+	layoutBuf := make([]byte, 16)
+	if _, err := io.ReadFull(r.file, layoutBuf); err != nil {
+		return nil, nil, header, 0, fmt.Errorf("failed to read block layout: %w", err)
 	}
 
-	// Read block layout
-	var layout BlockLayout
-	if err := binary.Read(r.file, binary.LittleEndian, &layout.IDSectionOffset); err != nil {
-		return nil, nil, header, 0, fmt.Errorf("failed to read ID section offset: %w", err)
-	}
-	if err := binary.Read(r.file, binary.LittleEndian, &layout.IDSectionSize); err != nil {
-		return nil, nil, header, 0, fmt.Errorf("failed to read ID section size: %w", err)
-	}
-	if err := binary.Read(r.file, binary.LittleEndian, &layout.ValueSectionOffset); err != nil {
-		return nil, nil, header, 0, fmt.Errorf("failed to read value section offset: %w", err)
-	}
-	if err := binary.Read(r.file, binary.LittleEndian, &layout.ValueSectionSize); err != nil {
-		return nil, nil, header, 0, fmt.Errorf("failed to read value section size: %w", err)
-	}
-
-	// Calculate count from layout
-	layoutCount := layout.IDSectionSize / 8 // 8 bytes per ID
+	// Create arrays for IDs and values
+	ids := make([]uint64, blockCount)
+	values := make([]int64, blockCount)
 	
-	// Verify count is consistent
-	if layoutCount > 0 && (blockCount != layoutCount) {
-		// This is a warning, but we'll use the layout value since it's likely more accurate
-		// fmt.Printf("Warning: count mismatch: header=%d, layout=%d\n", blockCount, layoutCount)
-		blockCount = layoutCount
-	}
-
-	// Compute section positions
-	idSectionStart := blockOffset + 64 + 16 + uint64(layout.IDSectionOffset)
-	valueSectionStart := blockOffset + 64 + 16 + uint64(layout.ValueSectionOffset)
-
-	// Read ID data
-	if _, err := r.file.Seek(int64(idSectionStart), io.SeekStart); err != nil {
+	// Calculate the data section position
+	dataStart := blockOffset + 64 + 16 // Block header (64) + Block layout (16)
+	
+	// The first 4 bytes of the data section are the size
+	// Skip these to get to the actual ID values
+	if _, err := r.file.Seek(int64(dataStart)+4, io.SeekStart); err != nil {
 		return nil, nil, header, 0, fmt.Errorf("failed to seek to ID section: %w", err)
 	}
 	
-	ids := make([]uint64, blockCount)
+	// Read all IDs
 	for i := uint32(0); i < blockCount; i++ {
 		if err := binary.Read(r.file, binary.LittleEndian, &ids[i]); err != nil {
 			return nil, nil, header, 0, fmt.Errorf("failed to read ID at index %d: %w", i, err)
 		}
 	}
-
-	// Read value data
-	if _, err := r.file.Seek(int64(valueSectionStart), io.SeekStart); err != nil {
+	
+	// Value section starts after all IDs
+	valueStart := dataStart + 4 + uint64(blockCount*8)
+	if _, err := r.file.Seek(int64(valueStart), io.SeekStart); err != nil {
 		return nil, nil, header, 0, fmt.Errorf("failed to seek to value section: %w", err)
 	}
 	
-	values := make([]int64, blockCount)
+	// Read all values
 	for i := uint32(0); i < blockCount; i++ {
 		if err := binary.Read(r.file, binary.LittleEndian, &values[i]); err != nil {
 			return nil, nil, header, 0, fmt.Errorf("failed to read value at index %d: %w", i, err)

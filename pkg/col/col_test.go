@@ -120,8 +120,7 @@ func TestWriteAndReadSimpleFile(t *testing.T) {
 		t.Errorf("Expected 1 block, got %d", reader.BlockCount())
 	}
 
-	// Replace the aggregation code with hardcoded expected values for now
-	// while we fix the binary format issues
+	// Verify aggregation results
 	expectedAgg := AggregateResult{
 		Count: 10,
 		Min:   100,
@@ -129,13 +128,29 @@ func TestWriteAndReadSimpleFile(t *testing.T) {
 		Sum:   5500,
 		Avg:   550.0,
 	}
-	_ = expectedAgg // To avoid unused variable warning
+	
+	actualAgg := reader.Aggregate()
+	
+	if actualAgg.Count != expectedAgg.Count {
+		t.Errorf("Aggregation count mismatch: expected %d, got %d", expectedAgg.Count, actualAgg.Count)
+	}
+	if actualAgg.Min != expectedAgg.Min {
+		t.Errorf("Aggregation min mismatch: expected %d, got %d", expectedAgg.Min, actualAgg.Min)
+	}
+	if actualAgg.Max != expectedAgg.Max {
+		t.Errorf("Aggregation max mismatch: expected %d, got %d", expectedAgg.Max, actualAgg.Max)
+	}
+	if actualAgg.Sum != expectedAgg.Sum {
+		t.Errorf("Aggregation sum mismatch: expected %d, got %d", expectedAgg.Sum, actualAgg.Sum)
+	}
+	if actualAgg.Avg != expectedAgg.Avg {
+		t.Errorf("Aggregation avg mismatch: expected %.2f, got %.2f", expectedAgg.Avg, actualAgg.Avg)
+	}
 	
 	// Read the data
 	var readIds []uint64
 	var readValues []int64
 	
-	// Always read from the file - DEBUG_ONLY is no longer needed
 	var readErr error
 	readIds, readValues, readErr = reader.GetPairs(0)
 	if readErr != nil {
@@ -150,19 +165,6 @@ func TestWriteAndReadSimpleFile(t *testing.T) {
 	if len(readValues) > 0 {
 		t.Logf("First few values: %v", readValues[:min(5, len(readValues))])
 	}
-	
-	// For this test, we'll verify that we got data back but skip exact value checks
-	// since our format may have changed and we're more interested in
-	// the general structure rather than exact values
-	if len(readIds) < 1 {
-		t.Errorf("Expected at least 1 ID, got %d", len(readIds))
-	}
-	if len(readValues) < 1 {
-		t.Errorf("Expected at least 1 value, got %d", len(readValues))
-	}
-	
-	// Skip the detailed value checks for now
-	return
 	
 	// Check data integrity
 	if len(readIds) != len(ids) {
@@ -208,7 +210,6 @@ func TestDifferentDataFile(t *testing.T) {
 	if err := writer.FinalizeAndClose(); err != nil {
 		t.Fatalf("Failed to finalize file: %v", err)
 	}
-	// 	t.Logf("Reader debug: %s", reader.DebugInfo())
 
 	// Open the file for reading
 	reader, err := NewReader(tempFile)
@@ -216,6 +217,11 @@ func TestDifferentDataFile(t *testing.T) {
 		t.Fatalf("Failed to open file: %v", err)
 	}
 	defer reader.Close()
+	
+	// Print debug info if verbose
+	if testing.Verbose() {
+		t.Logf("Reader debug: %s", reader.DebugInfo())
+	}
 
 	// Check file metadata
 	if reader.Version() != Version {
@@ -225,8 +231,7 @@ func TestDifferentDataFile(t *testing.T) {
 		t.Errorf("Expected 1 block, got %d", reader.BlockCount())
 	}
 
-	// Replace the aggregation code with hardcoded expected values for now
-	// while we fix the binary format issues
+	// Verify aggregation results
 	expectedAgg := AggregateResult{
 		Count: 5,
 		Min:   10,
@@ -234,13 +239,29 @@ func TestDifferentDataFile(t *testing.T) {
 		Sum:   150,
 		Avg:   30.0,
 	}
-	_ = expectedAgg // To avoid unused variable warning
+	
+	actualAgg := reader.Aggregate()
+	
+	if actualAgg.Count != expectedAgg.Count {
+		t.Errorf("Aggregation count mismatch: expected %d, got %d", expectedAgg.Count, actualAgg.Count)
+	}
+	if actualAgg.Min != expectedAgg.Min {
+		t.Errorf("Aggregation min mismatch: expected %d, got %d", expectedAgg.Min, actualAgg.Min)
+	}
+	if actualAgg.Max != expectedAgg.Max {
+		t.Errorf("Aggregation max mismatch: expected %d, got %d", expectedAgg.Max, actualAgg.Max)
+	}
+	if actualAgg.Sum != expectedAgg.Sum {
+		t.Errorf("Aggregation sum mismatch: expected %d, got %d", expectedAgg.Sum, actualAgg.Sum)
+	}
+	if actualAgg.Avg != expectedAgg.Avg {
+		t.Errorf("Aggregation avg mismatch: expected %.2f, got %.2f", expectedAgg.Avg, actualAgg.Avg)
+	}
 	
 	// Read the data
 	var readIds []uint64
 	var readValues []int64
 	
-	// Always read from the file - DEBUG_ONLY is no longer needed
 	var readErr error
 	readIds, readValues, readErr = reader.GetPairs(0)
 	if readErr != nil {
@@ -255,19 +276,6 @@ func TestDifferentDataFile(t *testing.T) {
 	if len(readValues) > 0 {
 		t.Logf("First few values: %v", readValues[:min(5, len(readValues))])
 	}
-	
-	// For this test, we'll verify that we got data back but skip exact value checks
-	// since our format may have changed and we're more interested in
-	// the general structure rather than exact values
-	if len(readIds) < 1 {
-		t.Errorf("Expected at least 1 ID, got %d", len(readIds))
-	}
-	if len(readValues) < 1 {
-		t.Errorf("Expected at least 1 value, got %d", len(readValues))
-	}
-	
-	// Skip the detailed value checks for now
-	return
 	
 	// Check data integrity
 	if len(readIds) != len(ids) {
@@ -705,7 +713,6 @@ func TestDeltaEncoding(t *testing.T) {
 	var readIds []uint64
 	var readValues []int64
 	
-	// Always read from the file - DEBUG_ONLY is no longer needed
 	var readErr error
 	readIds, readValues, readErr = reader.GetPairs(0)
 	if readErr != nil {
@@ -721,19 +728,6 @@ func TestDeltaEncoding(t *testing.T) {
 		t.Logf("First few values: %v", readValues[:min(5, len(readValues))])
 	}
 	
-	// For this test, we'll verify that we got data back but skip exact value checks
-	// since our format may have changed and we're more interested in
-	// the general structure rather than exact values
-	if len(readIds) < 1 {
-		t.Errorf("Expected at least 1 ID, got %d", len(readIds))
-	}
-	if len(readValues) < 1 {
-		t.Errorf("Expected at least 1 value, got %d", len(readValues))
-	}
-	
-	// Skip the detailed value checks for now
-	return
-
 	// Check data integrity
 	if len(readIds) != len(ids) {
 		t.Errorf("Expected %d IDs, got %d", len(ids), len(readIds))
@@ -892,7 +886,6 @@ func TestEncodingSpaceEfficiency(t *testing.T) {
 	var rawIds, deltaIds []uint64
 	var rawValues, deltaValues []int64
 	
-	// Always read from the file - DEBUG_ONLY is no longer needed
 	rawIds, rawValues, err = rawReader.GetPairs(0)
 	if err != nil {
 		t.Fatalf("Failed to read raw pairs: %v", err)
@@ -909,19 +902,6 @@ func TestEncodingSpaceEfficiency(t *testing.T) {
 	// Print debug info
 	t.Logf("Read %d delta IDs and %d delta values", len(deltaIds), len(deltaValues))
 	
-	// For this test, we'll verify that we got data back but skip exact comparisons
-	// since our format may have changed and we're more interested in
-	// the general structure rather than exact values
-	if len(rawIds) < 1 {
-		t.Errorf("Expected at least 1 raw ID, got %d", len(rawIds))
-	}
-	if len(deltaIds) < 1 {
-		t.Errorf("Expected at least 1 delta ID, got %d", len(deltaIds))
-	}
-	
-	// Skip the detailed value checks for now
-	return
-
 	// Verify the data is the same regardless of encoding
 	if len(rawIds) != len(deltaIds) {
 		t.Errorf("ID count mismatch: raw=%d, delta=%d", len(rawIds), len(deltaIds))
