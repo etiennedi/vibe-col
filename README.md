@@ -1,6 +1,6 @@
-# Vibe-LSM
+# Vibe-Col
 
-Vibe-LSM is a high-performance column-oriented storage engine designed for efficient data storage and retrieval.
+Vibe-Col is a high-performance column-oriented storage engine designed for efficient data storage and retrieval.
 
 ## Features
 
