@@ -10,6 +10,7 @@ import (
 // Reader reads a column file
 type Reader struct {
 	file       *os.File
+	fileSize   int64
 	header     FileHeader
 	footerMeta FooterMetadata
 	blockIndex []FooterEntry
@@ -22,8 +23,17 @@ func NewReader(filename string) (*Reader, error) {
 		return nil, fmt.Errorf("failed to open file: %w", err)
 	}
 
+	// Get file size immediately as we'll need it for various offset calculations
+	fileInfo, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("failed to get file info: %w", err)
+	}
+	fileSize := fileInfo.Size()
+
 	reader := &Reader{
-		file: file,
+		file:     file,
+		fileSize: fileSize,
 	}
 
 	// Read the file header
@@ -41,43 +51,96 @@ func NewReader(filename string) (*Reader, error) {
 	return reader, nil
 }
 
+// readBytesAt reads bytes at a specific offset
+func (r *Reader) readBytesAt(offset int64, size int) ([]byte, error) {
+	buf := make([]byte, size)
+	n, err := r.file.ReadAt(buf, offset)
+	if err != nil && err != io.EOF {
+		return nil, fmt.Errorf("failed to read bytes at offset %d: %w", offset, err)
+	}
+	if n < size && err != io.EOF {
+		return nil, fmt.Errorf("incomplete read at offset %d: got %d bytes, expected %d", offset, n, size)
+	}
+	return buf, nil
+}
+
+// readUint64At reads a uint64 at a specific offset
+func (r *Reader) readUint64At(offset int64) (uint64, error) {
+	buf, err := r.readBytesAt(offset, 8)
+	if err != nil {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint64(buf), nil
+}
+
+// readUint32At reads a uint32 at a specific offset
+func (r *Reader) readUint32At(offset int64) (uint32, error) {
+	buf, err := r.readBytesAt(offset, 4)
+	if err != nil {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint32(buf), nil
+}
+
 // readHeader reads the file header from the file
 func (r *Reader) readHeader() error {
-	// Seek to the beginning of the file
-	if _, err := r.file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("failed to seek to start: %w", err)
-	}
+	// Read header fields using ReadAt
+	var err error
+	var offset int64 = 0
 
-	// Read header fields
-	if err := binary.Read(r.file, binary.LittleEndian, &r.header.Magic); err != nil {
+	// Read magic number
+	r.header.Magic, err = r.readUint64At(offset)
+	if err != nil {
 		return fmt.Errorf("failed to read magic number: %w", err)
 	}
-	if err := binary.Read(r.file, binary.LittleEndian, &r.header.Version); err != nil {
+	offset += 8
+
+	// Read version
+	r.header.Version, err = r.readUint32At(offset)
+	if err != nil {
 		return fmt.Errorf("failed to read version: %w", err)
 	}
-	if err := binary.Read(r.file, binary.LittleEndian, &r.header.ColumnType); err != nil {
+	offset += 4
+
+	// Read column type
+	r.header.ColumnType, err = r.readUint32At(offset)
+	if err != nil {
 		return fmt.Errorf("failed to read column type: %w", err)
 	}
-	if err := binary.Read(r.file, binary.LittleEndian, &r.header.BlockCount); err != nil {
+	offset += 4
+
+	// Read block count
+	r.header.BlockCount, err = r.readUint64At(offset)
+	if err != nil {
 		return fmt.Errorf("failed to read block count: %w", err)
 	}
-	if err := binary.Read(r.file, binary.LittleEndian, &r.header.BlockSizeTarget); err != nil {
+	offset += 8
+
+	// Read block size target
+	r.header.BlockSizeTarget, err = r.readUint32At(offset)
+	if err != nil {
 		return fmt.Errorf("failed to read block size target: %w", err)
 	}
-	if err := binary.Read(r.file, binary.LittleEndian, &r.header.CompressionType); err != nil {
+	offset += 4
+
+	// Read compression type
+	r.header.CompressionType, err = r.readUint32At(offset)
+	if err != nil {
 		return fmt.Errorf("failed to read compression type: %w", err)
 	}
-	if err := binary.Read(r.file, binary.LittleEndian, &r.header.EncodingType); err != nil {
+	offset += 4
+
+	// Read encoding type
+	r.header.EncodingType, err = r.readUint32At(offset)
+	if err != nil {
 		return fmt.Errorf("failed to read encoding type: %w", err)
 	}
-	if err := binary.Read(r.file, binary.LittleEndian, &r.header.CreationTime); err != nil {
-		return fmt.Errorf("failed to read creation time: %w", err)
-	}
+	offset += 4
 
-	// Skip reserved space
-	reservedSize := 64 - 8 - 4 - 4 - 8 - 4 - 4 - 4 - 8
-	if _, err := r.file.Seek(int64(reservedSize), io.SeekCurrent); err != nil {
-		return fmt.Errorf("failed to skip reserved space: %w", err)
+	// Read creation time
+	r.header.CreationTime, err = r.readUint64At(offset)
+	if err != nil {
+		return fmt.Errorf("failed to read creation time: %w", err)
 	}
 
 	// Validate header
@@ -93,29 +156,30 @@ func (r *Reader) readHeader() error {
 
 // readFooter reads the footer from the file
 func (r *Reader) readFooter() error {
-	// Get file size
-	fileInfo, err := r.file.Stat()
-	if err != nil {
-		return fmt.Errorf("failed to get file info: %w", err)
-	}
-	fileSize := fileInfo.Size()
-
 	// The last 24 bytes of the file are the footer metadata
-	if fileSize < 24 {
-		return fmt.Errorf("file too small for footer: %d bytes", fileSize)
+	if r.fileSize < 24 {
+		return fmt.Errorf("file too small for footer: %d bytes", r.fileSize)
 	}
 
-	// Read footer metadata
-	if _, err := r.file.Seek(fileSize-24, io.SeekStart); err != nil {
-		return fmt.Errorf("failed to seek to footer metadata: %w", err)
-	}
-	if err := binary.Read(r.file, binary.LittleEndian, &r.footerMeta.FooterSize); err != nil {
+	// Read footer metadata from the end of the file
+	footerMetaOffset := r.fileSize - 24
+
+	// Read footer size
+	var err error
+	r.footerMeta.FooterSize, err = r.readUint64At(footerMetaOffset)
+	if err != nil {
 		return fmt.Errorf("failed to read footer size: %w", err)
 	}
-	if err := binary.Read(r.file, binary.LittleEndian, &r.footerMeta.Checksum); err != nil {
+
+	// Read checksum
+	r.footerMeta.Checksum, err = r.readUint64At(footerMetaOffset + 8)
+	if err != nil {
 		return fmt.Errorf("failed to read checksum: %w", err)
 	}
-	if err := binary.Read(r.file, binary.LittleEndian, &r.footerMeta.Magic); err != nil {
+
+	// Read footer magic
+	r.footerMeta.Magic, err = r.readUint64At(footerMetaOffset + 16)
+	if err != nil {
 		return fmt.Errorf("failed to read footer magic: %w", err)
 	}
 
@@ -125,19 +189,17 @@ func (r *Reader) readFooter() error {
 	}
 
 	// Read the rest of the footer
-	footerStart := fileSize - 24 - int64(r.footerMeta.FooterSize)
+	footerStart := footerMetaOffset - int64(r.footerMeta.FooterSize)
 	if footerStart < 64 { // Footer cannot start before the header
 		return fmt.Errorf("invalid footer size: %d", r.footerMeta.FooterSize)
 	}
 
 	// Read block index count
-	if _, err := r.file.Seek(footerStart, io.SeekStart); err != nil {
-		return fmt.Errorf("failed to seek to footer: %w", err)
-	}
-	var blockIndexCount uint32
-	if err := binary.Read(r.file, binary.LittleEndian, &blockIndexCount); err != nil {
+	blockIndexCountBuf, err := r.readBytesAt(footerStart, 4)
+	if err != nil {
 		return fmt.Errorf("failed to read block index count: %w", err)
 	}
+	blockIndexCount := binary.LittleEndian.Uint32(blockIndexCountBuf)
 
 	// Check if block count matches with header
 	if uint64(blockIndexCount) != r.header.BlockCount {
@@ -149,33 +211,68 @@ func (r *Reader) readFooter() error {
 
 	// Read block index
 	r.blockIndex = make([]FooterEntry, blockIndexCount)
+	offset := footerStart + 4 // Start after the block index count
+
 	for i := uint32(0); i < blockIndexCount; i++ {
-		var entry FooterEntry
-		if err := binary.Read(r.file, binary.LittleEndian, &entry.BlockOffset); err != nil {
+		// Read each field of the footer entry
+		blockOffset, err := r.readUint64At(offset)
+		if err != nil {
 			return fmt.Errorf("failed to read block offset: %w", err)
 		}
-		if err := binary.Read(r.file, binary.LittleEndian, &entry.BlockSize); err != nil {
+		offset += 8
+
+		blockSize, err := r.readUint32At(offset)
+		if err != nil {
 			return fmt.Errorf("failed to read block size: %w", err)
 		}
-		if err := binary.Read(r.file, binary.LittleEndian, &entry.MinID); err != nil {
+		offset += 4
+
+		minID, err := r.readUint64At(offset)
+		if err != nil {
 			return fmt.Errorf("failed to read min ID: %w", err)
 		}
-		if err := binary.Read(r.file, binary.LittleEndian, &entry.MaxID); err != nil {
+		offset += 8
+
+		maxID, err := r.readUint64At(offset)
+		if err != nil {
 			return fmt.Errorf("failed to read max ID: %w", err)
 		}
-		if err := binary.Read(r.file, binary.LittleEndian, &entry.MinValue); err != nil {
+		offset += 8
+
+		minValue, err := r.readUint64At(offset)
+		if err != nil {
 			return fmt.Errorf("failed to read min value: %w", err)
 		}
-		if err := binary.Read(r.file, binary.LittleEndian, &entry.MaxValue); err != nil {
+		offset += 8
+
+		maxValue, err := r.readUint64At(offset)
+		if err != nil {
 			return fmt.Errorf("failed to read max value: %w", err)
 		}
-		if err := binary.Read(r.file, binary.LittleEndian, &entry.Sum); err != nil {
+		offset += 8
+
+		sum, err := r.readUint64At(offset)
+		if err != nil {
 			return fmt.Errorf("failed to read sum: %w", err)
 		}
-		if err := binary.Read(r.file, binary.LittleEndian, &entry.Count); err != nil {
+		offset += 8
+
+		count, err := r.readUint32At(offset)
+		if err != nil {
 			return fmt.Errorf("failed to read count: %w", err)
 		}
-		r.blockIndex[i] = entry
+		offset += 4
+
+		r.blockIndex[i] = FooterEntry{
+			BlockOffset: blockOffset,
+			BlockSize:   blockSize,
+			MinID:       minID,
+			MaxID:       maxID,
+			MinValue:    minValue,
+			MaxValue:    maxValue,
+			Sum:         sum,
+			Count:       count,
+		}
 	}
 
 	return nil
@@ -193,37 +290,18 @@ func (r *Reader) readBlock(blockIndex int) ([]uint64, []int64, error) {
 	blockSize := int64(r.blockIndex[blockIndex].BlockSize)
 	count := int(r.blockIndex[blockIndex].Count)
 
-	// This is normal file processing - seek to the block start
-	blockStart, err := r.file.Seek(blockOffset, io.SeekStart)
+	// Skip the block header and read the block layout (16 bytes)
+	layoutOffset := blockOffset + blockHeaderSize
+	layoutBuf, err := r.readBytesAt(layoutOffset, 16)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to seek to block start: %w", err)
-	}
-
-	// Skip the block header
-	afterHeader, err := r.file.Seek(blockHeaderSize, io.SeekCurrent)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to skip block header: %w", err)
-	}
-
-	// Read the block layout (16 bytes)
-	layoutStart := afterHeader
-	var layout [4]uint32
-	if err := binary.Read(r.file, binary.LittleEndian, &layout); err != nil {
 		return nil, nil, fmt.Errorf("failed to read block layout: %w", err)
 	}
 
-	// Verify we read exactly 16 bytes (layout size)
-	layoutEnd, err := r.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get current position: %w", err)
-	}
-
-	if layoutEnd-layoutStart != 16 {
-		return nil, nil, fmt.Errorf("block layout size mismatch: expected=16, actual=%d",
-			layoutEnd-layoutStart)
-	}
-
-	_, idSectionSize, _, valueSectionSize := layout[0], layout[1], layout[2], layout[3]
+	// Parse the layout
+	idSectionOffset := binary.LittleEndian.Uint32(layoutBuf[0:4])
+	idSectionSize := binary.LittleEndian.Uint32(layoutBuf[4:8])
+	valueSectionOffset := binary.LittleEndian.Uint32(layoutBuf[8:12])
+	valueSectionSize := binary.LittleEndian.Uint32(layoutBuf[12:16])
 
 	// Validate header values
 	if idSectionSize == 0 {
@@ -233,47 +311,28 @@ func (r *Reader) readBlock(blockIndex int) ([]uint64, []int64, error) {
 		return nil, nil, fmt.Errorf("Value section size in header is 0")
 	}
 
-	// Get current position after reading the data section header
-	if _, err := r.file.Seek(0, io.SeekCurrent); err != nil {
-		return nil, nil, fmt.Errorf("failed to get data section position: %w", err)
-	}
+	// Calculate absolute offsets for ID and value sections
+	dataSectionStart := layoutOffset + 16
+	absoluteIdOffset := dataSectionStart + int64(idSectionOffset)
+	absoluteValueOffset := dataSectionStart + int64(valueSectionOffset)
 
 	// Read ID section
-	idBytes := make([]byte, idSectionSize)
-	bytesRead, err := io.ReadFull(r.file, idBytes)
+	idBytes, err := r.readBytesAt(absoluteIdOffset, int(idSectionSize))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read ID section: %w", err)
 	}
 
-	// Verify we read the expected amount
-	if bytesRead != int(idSectionSize) {
-		return nil, nil, fmt.Errorf("ID section read size mismatch: expected=%d, actual=%d",
-			idSectionSize, bytesRead)
-	}
-
 	// Read value section
-	valueBytes := make([]byte, valueSectionSize)
-	bytesRead, err = io.ReadFull(r.file, valueBytes)
+	valueBytes, err := r.readBytesAt(absoluteValueOffset, int(valueSectionSize))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read value section: %w", err)
 	}
 
-	// Verify we read the expected amount
-	if bytesRead != int(valueSectionSize) {
-		return nil, nil, fmt.Errorf("value section read size mismatch: expected=%d, actual=%d",
-			valueSectionSize, bytesRead)
-	}
-
-	// Get end position to verify block size
-	blockEnd, err := r.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get block end position: %w", err)
-	}
-
-	// The block should not exceed the size specified in the footer
-	if blockEnd-blockStart > blockSize {
-		return nil, nil, fmt.Errorf("read beyond block end: read to position %d, block ends at %d",
-			blockEnd, blockStart+blockSize)
+	// Verify we're not reading beyond the block size
+	totalBytesRead := blockHeaderSize + 16 + int64(idSectionSize) + int64(valueSectionSize)
+	if totalBytesRead > blockSize {
+		return nil, nil, fmt.Errorf("read beyond block end: read %d bytes, block size is %d",
+			totalBytesRead, blockSize)
 	}
 
 	// Decode IDs and values
