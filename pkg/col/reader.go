@@ -402,14 +402,12 @@ func decodeUVarInts(buf []byte, count int) ([]uint64, error) {
 			// If we can't decode any more varints but we've already decoded some,
 			// return what we have instead of failing
 			if i > 0 {
-				fmt.Printf("Failed to decode at index %d after reading %d values, returning what we have\n", i, len(vals))
 				return vals, nil
 			}
 			return nil, fmt.Errorf("failed to decode uvarint at index %d, bytes remaining: %d", i, len(buf)-offset)
 		}
 
 		vals = append(vals, v)
-		fmt.Printf("Decoded UVarInt at index %d: value=%d, bytes read=%d, offset=%d\n", i, v, n, offset)
 		offset += n
 	}
 

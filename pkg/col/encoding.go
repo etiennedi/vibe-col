@@ -1,9 +1,5 @@
 package col
 
-import (
-	"fmt"
-)
-
 // DeltaEncoder handles delta encoding for a sequence of values
 type DeltaEncoder interface {
 	Encode(values interface{}) interface{}
@@ -195,15 +191,6 @@ func encodeSignedVarInt(value int64) []byte {
 // It first decodes the ZigZag-encoded unsigned integer, then converts it back
 // to a signed integer
 func decodeSignedVarInt(data []byte) (int64, int) {
-	// Print the first few bytes for debugging
-	if len(data) > 0 {
-		fmt.Printf("decodeSignedVarInt input bytes: ")
-		for i := 0; i < 10 && i < len(data); i++ {
-			fmt.Printf("%02x ", data[i])
-		}
-		fmt.Println()
-	}
-
 	zigzag, bytesRead := decodeVarInt(data)
 
 	// ZigZag decoding: convert unsigned back to signed
@@ -214,11 +201,6 @@ func decodeSignedVarInt(data []byte) (int64, int) {
 	// 3 -> -2
 	// ...and so on
 	value := int64((zigzag >> 1) ^ (-(zigzag & 1)))
-
-	// Debug output for large values
-	if zigzag > 1000000 {
-		fmt.Printf("Large zigzag value: %d, decoded to: %d, bytes read: %d\n", zigzag, value, bytesRead)
-	}
 
 	return value, bytesRead
 }

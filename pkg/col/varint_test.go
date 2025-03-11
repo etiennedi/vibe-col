@@ -1,7 +1,6 @@
 package col
 
 import (
-	"fmt"
 	"os"
 	"testing"
 )
@@ -142,7 +141,7 @@ func TestVarintEncodingCompression(t *testing.T) {
 	defer os.Remove(tempFileVarInt)
 
 	// Create sequential data that should compress well
-	const count = 10000
+	const count = 100000
 	ids := make([]uint64, count)
 	values := make([]int64, count)
 
@@ -199,11 +198,23 @@ func TestVarintEncodingCompression(t *testing.T) {
 		t.Logf("VarInt compression: raw=%d bytes, varint=%d bytes, ratio=%.2fx",
 			rawSize, varIntSize, compressionRatio)
 
+		// Add display in kilobytes
+		rawSizeKB := float64(rawSize) / 1024.0
+		varIntSizeKB := float64(varIntSize) / 1024.0
+		t.Logf("Sizes in kB: raw=%.2f kB, varint=%.2f kB", rawSizeKB, varIntSizeKB)
+
 		// For small sequential values, we expect at least 2x compression
 		if compressionRatio < 2.0 {
 			t.Errorf("VarInt compression ratio (%.2fx) is lower than expected (at least 2x)",
 				compressionRatio)
 		}
+
+		// Calculate exact savings
+		byteSavings := rawSize - varIntSize
+		percentageSavings := (float64(byteSavings) / float64(rawSize)) * 100
+
+		// Print exact savings
+		t.Logf("Exact savings: %d bytes (%.2f%%)", byteSavings, percentageSavings)
 	}
 
 	// Verify that both files contain the correct data
@@ -272,8 +283,6 @@ func TestVarIntEncodeDecode(t *testing.T) {
 		if bytesRead != len(encoded) {
 			t.Errorf("Bytes read mismatch: expected %d, got %d", len(encoded), bytesRead)
 		}
-
-		fmt.Printf("Value: %d, encoded size: %d bytes, decoded: %d\n", tc, len(encoded), decoded)
 	}
 }
 
@@ -296,7 +305,5 @@ func TestSignedVarIntEncodeDecode(t *testing.T) {
 		if bytesRead != len(encoded) {
 			t.Errorf("Bytes read mismatch: expected %d, got %d", len(encoded), bytesRead)
 		}
-
-		fmt.Printf("Value: %d, encoded size: %d bytes, decoded: %d\n", tc, len(encoded), decoded)
 	}
 }
