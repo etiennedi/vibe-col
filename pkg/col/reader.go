@@ -225,9 +225,9 @@ func (r *Reader) readBlock(blockIndex int) ([]uint64, []int64, error) {
 			return nil, nil, fmt.Errorf("failed to read data section header: %w", err)
 		}
 
-		// Log the header values for debugging
-		fmt.Printf("Data section header: idSectionSize=%d, valueSectionSize=%d, count=%d\n",
-			dataSectionHeader[0], dataSectionHeader[1], dataSectionHeader[2])
+		// Uncomment for debugging if needed
+		// fmt.Printf("Data section header: idSectionSize=%d, valueSectionSize=%d, count=%d\n",
+		//	dataSectionHeader[0], dataSectionHeader[1], dataSectionHeader[2])
 
 		// Update the section sizes
 		if idSectionSize == 0 {
@@ -266,7 +266,7 @@ func (r *Reader) readBlock(blockIndex int) ([]uint64, []int64, error) {
 						// Calculate the expected value section size
 						expectedValueSize := blockSize - uint32(currentPos-int64(blockOffset)) - idSectionSize
 						if expectedValueSize > valueSectionSize && expectedValueSize < 10000000 { // Sanity check
-							fmt.Printf("Adjusting value section size: reported=%d, expected=%d\n",
+							fmt.Printf("Data section sizes: reported=%d, using=%d\n",
 								valueSectionSize, expectedValueSize)
 							valueSectionSize = expectedValueSize
 						}
@@ -383,17 +383,17 @@ func decodeUVarInts(buf []byte, count int) ([]uint64, error) {
 	vals := make([]uint64, 0, count)
 	offset := 0
 
-	// Debug information
-	fmt.Printf("Decoding %d UVarInts from buffer of size %d bytes\n", count, len(buf))
-
-	// Print the first few bytes of the buffer
-	if len(buf) > 0 {
-		fmt.Printf("First 20 bytes of buffer: ")
-		for i := 0; i < 20 && i < len(buf); i++ {
-			fmt.Printf("%02x ", buf[i])
-		}
-		fmt.Println()
-	}
+	// Uncomment for debugging if needed
+	// fmt.Printf("Decoding %d UVarInts from buffer of size %d bytes\n", count, len(buf))
+	// 
+	// // Print the first few bytes of the buffer
+	// if len(buf) > 0 {
+	// 	fmt.Printf("First 20 bytes of buffer: ")
+	// 	for i := 0; i < 20 && i < len(buf); i++ {
+	// 		fmt.Printf("%02x ", buf[i])
+	// 	}
+	// 	fmt.Println()
+	// }
 
 	// Try to decode up to 'count' varints, but stop if we run out of data
 	for i := 0; i < count && offset < len(buf); i++ {
@@ -418,9 +418,11 @@ func decodeUVarInts(buf []byte, count int) ([]uint64, error) {
 		offset += n
 	}
 
-	// If we couldn't decode enough varints, log the situation
+	// If we couldn't decode enough varints, return an error
 	if len(vals) < count {
-		fmt.Printf("Warning: Only decoded %d varints, expected %d\n", len(vals), count)
+		// Uncomment for debugging if needed
+		// fmt.Printf("Warning: Only decoded %d varints, expected %d\n", len(vals), count)
+		return nil, fmt.Errorf("incomplete data: only decoded %d of %d expected varints", len(vals), count)
 	}
 
 	return vals, nil

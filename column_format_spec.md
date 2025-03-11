@@ -99,11 +99,11 @@ Each block has a common layout structure regardless of encoding:
 +-------------------+----------------+----------------------------------+
 | Field             | Size (bytes)   | Description                      |
 +-------------------+----------------+----------------------------------+
-| Data Section Header| 16            | Contains:                        |
+| Block Layout      | 16            | Contains:                        |
+|                    |               | - ID Section Offset (4 bytes)    |
 |                    |               | - ID Section Size (4 bytes)      |
+|                    |               | - Value Section Offset (4 bytes) |
 |                    |               | - Value Section Size (4 bytes)   |
-|                    |               | - Entry Count (4 bytes)          |
-|                    |               | - Reserved (4 bytes)             |
 +-------------------+----------------+----------------------------------+
 | ID Data           | Variable       | Encoded ID data                  |
 +-------------------+----------------+----------------------------------+
