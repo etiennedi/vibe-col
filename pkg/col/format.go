@@ -16,12 +16,12 @@ const (
 	DataTypeInt64 uint32 = 0
 
 	// Encoding types
-	EncodingRaw       uint32 = 0
-	EncodingDeltaID   uint32 = 1 // Delta encoding for IDs
-	EncodingDeltaValue uint32 = 2 // Delta encoding for values
-	EncodingDeltaBoth  uint32 = 3 // Delta encoding for both IDs and values
-	EncodingVarInt     uint32 = 4 // Variable-length integer encoding
-	EncodingVarIntID   uint32 = 5 // Variable-length encoding for IDs
+	EncodingRaw         uint32 = 0
+	EncodingDeltaID     uint32 = 1 // Delta encoding for IDs
+	EncodingDeltaValue  uint32 = 2 // Delta encoding for values
+	EncodingDeltaBoth   uint32 = 3 // Delta encoding for both IDs and values
+	EncodingVarInt      uint32 = 4 // Variable-length integer encoding
+	EncodingVarIntID    uint32 = 5 // Variable-length encoding for IDs
 	EncodingVarIntValue uint32 = 6 // Variable-length encoding for values
 	EncodingVarIntBoth  uint32 = 7 // Variable-length encoding for both IDs and values
 
@@ -44,38 +44,38 @@ type FileHeader struct {
 
 // BlockHeader represents the header of a block
 type BlockHeader struct {
-	MinID           uint64
-	MaxID           uint64
-	MinValue        uint64 // Stored as uint64, but represents int64
-	MaxValue        uint64 // Stored as uint64, but represents int64
-	Sum             uint64 // Stored as uint64, but represents int64
-	Count           uint32
-	EncodingType    uint32
-	CompressionType uint32
+	MinID            uint64
+	MaxID            uint64
+	MinValue         uint64 // Stored as uint64, but represents int64
+	MaxValue         uint64 // Stored as uint64, but represents int64
+	Sum              uint64 // Stored as uint64, but represents int64
+	Count            uint32
+	EncodingType     uint32
+	CompressionType  uint32
 	UncompressedSize uint32
 	CompressedSize   uint32
-	Checksum        uint64
+	Checksum         uint64
 	// Reserved space - fills up to 64 bytes
 }
 
 // BlockLayout represents the layout of a block
 type BlockLayout struct {
-	IDSectionOffset     uint32
-	IDSectionSize       uint32
-	ValueSectionOffset  uint32
-	ValueSectionSize    uint32
+	IDSectionOffset    uint32
+	IDSectionSize      uint32
+	ValueSectionOffset uint32
+	ValueSectionSize   uint32
 }
 
 // FooterEntry represents an entry in the footer
 type FooterEntry struct {
-	BlockOffset     uint64
-	BlockSize       uint32
-	MinID           uint64
-	MaxID           uint64
-	MinValue        uint64 // Stored as uint64, but represents int64
-	MaxValue        uint64 // Stored as uint64, but represents int64
-	Sum             uint64 // Stored as uint64, but represents int64
-	Count           uint32
+	BlockOffset uint64
+	BlockSize   uint32
+	MinID       uint64
+	MaxID       uint64
+	MinValue    uint64 // Stored as uint64, but represents int64
+	MaxValue    uint64 // Stored as uint64, but represents int64
+	Sum         uint64 // Stored as uint64, but represents int64
+	Count       uint32
 }
 
 // FooterMetadata represents the metadata at the end of the footer
@@ -110,9 +110,9 @@ func NewFileHeader(blockCount uint64, blockSizeTarget uint32, encodingType uint3
 
 // NewBlockHeader creates a new block header with specified values
 func NewBlockHeader(
-	minID, maxID uint64, 
-	minValue, maxValue, sum int64, 
-	count uint32, 
+	minID, maxID uint64,
+	minValue, maxValue, sum int64,
+	count uint32,
 	encodingType uint32,
 ) BlockHeader {
 	// Convert int64 values to uint64 for storage
@@ -129,18 +129,18 @@ func NewBlockHeader(
 		Count:            count,
 		EncodingType:     encodingType,
 		CompressionType:  CompressionNone,
-		UncompressedSize: CalculateBlockSize(count, encodingType),
-		CompressedSize:   CalculateBlockSize(count, encodingType), // Same as uncompressed for now
-		Checksum:         0,                         // Not implemented yet
+		UncompressedSize: 0, // Not implemented yet
+		CompressedSize:   0, // Not implemented yet
+		Checksum:         0, // Not implemented yet
 	}
 }
 
 // NewFooterEntry creates a new footer entry
 func NewFooterEntry(
-	blockOffset uint64, 
-	blockSize uint32, 
-	minID, maxID uint64, 
-	minValue, maxValue, sum int64, 
+	blockOffset uint64,
+	blockSize uint32,
+	minID, maxID uint64,
+	minValue, maxValue, sum int64,
 	count uint32,
 ) FooterEntry {
 	// Convert int64 values to uint64 for storage
@@ -158,36 +158,4 @@ func NewFooterEntry(
 		Sum:         sumU64,
 		Count:       count,
 	}
-}
-
-// CalculateBlockSize calculates the size of a block based on the number of entries
-// and encoding type. For variable-length encoding, this returns an estimate.
-func CalculateBlockSize(count uint32, encodingType uint32) uint32 {
-	// 64 bytes for block header
-	// 16 bytes for block layout
-	
-	// For variable-length encoding, estimate the size
-	isVarInt := encodingType == EncodingVarInt || 
-				encodingType == EncodingVarIntID || 
-				encodingType == EncodingVarIntValue || 
-				encodingType == EncodingVarIntBoth
-	
-	if isVarInt {
-		// For variable-length encoding, estimate based on average bytes per value
-		// Assume average of 2 bytes per value for small numbers (conservative estimate)
-		idSize := uint32(count * 2)
-		valueSize := uint32(count * 2)
-		
-		// If only IDs or only values use varint, adjust accordingly
-		if encodingType == EncodingVarIntID {
-			valueSize = count * 8 // Values still use fixed 8 bytes
-		} else if encodingType == EncodingVarIntValue {
-			idSize = count * 8 // IDs still use fixed 8 bytes
-		}
-		
-		return 64 + 16 + idSize + valueSize
-	}
-	
-	// For fixed-width encoding, exact calculation
-	return 64 + 16 + (count * 8 * 2) // 8 bytes per ID and 8 bytes per value
 }

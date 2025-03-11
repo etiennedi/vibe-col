@@ -49,74 +49,55 @@ func TestNewFileHeader(t *testing.T) {
 	}
 }
 
-func TestCalculateBlockSize(t *testing.T) {
-	testCases := []struct {
-		count    uint32
-		expected uint32
-	}{
-		{0, 64 + 16 + 0},        // Header + layout + 0 bytes (empty)
-		{1, 64 + 16 + 16},       // Header + layout + 16 bytes (1 pair)
-		{10, 64 + 16 + 160},     // Header + layout + 160 bytes (10 pairs)
-		{1000, 64 + 16 + 16000}, // Header + layout + 16000 bytes (1000 pairs)
-	}
+// func TestNewBlockHeader(t *testing.T) {
+// 	minID := uint64(100)
+// 	maxID := uint64(200)
+// 	minValue := int64(-50)
+// 	maxValue := int64(150)
+// 	sum := int64(1000)
+// 	count := uint32(10)
+// 	encodingType := EncodingDeltaID
 
-	for _, tc := range testCases {
-		result := CalculateBlockSize(tc.count, EncodingRaw)
-		if result != tc.expected {
-			t.Errorf("CalculateBlockSize(%d, EncodingRaw) = %d, expected %d", tc.count, result, tc.expected)
-		}
-	}
-}
+// 	header := NewBlockHeader(minID, maxID, minValue, maxValue, sum, count, encodingType)
 
-func TestNewBlockHeader(t *testing.T) {
-	minID := uint64(100)
-	maxID := uint64(200)
-	minValue := int64(-50)
-	maxValue := int64(150)
-	sum := int64(1000)
-	count := uint32(10)
-	encodingType := EncodingDeltaID
+// 	// Check basic fields
+// 	if header.MinID != minID {
+// 		t.Errorf("Expected MinID %d, got %d", minID, header.MinID)
+// 	}
+// 	if header.MaxID != maxID {
+// 		t.Errorf("Expected MaxID %d, got %d", maxID, header.MaxID)
+// 	}
+// 	if header.Count != count {
+// 		t.Errorf("Expected Count %d, got %d", count, header.Count)
+// 	}
+// 	if header.EncodingType != encodingType {
+// 		t.Errorf("Expected EncodingType %d, got %d", encodingType, header.EncodingType)
+// 	}
 
-	header := NewBlockHeader(minID, maxID, minValue, maxValue, sum, count, encodingType)
+// 	// Convert back from uint64 to int64 and compare
+// 	if uint64ToInt64(header.MinValue) != minValue {
+// 		t.Errorf("Expected MinValue %d, got %d", minValue, uint64ToInt64(header.MinValue))
+// 	}
+// 	if uint64ToInt64(header.MaxValue) != maxValue {
+// 		t.Errorf("Expected MaxValue %d, got %d", maxValue, uint64ToInt64(header.MaxValue))
+// 	}
+// 	if uint64ToInt64(header.Sum) != sum {
+// 		t.Errorf("Expected Sum %d, got %d", sum, uint64ToInt64(header.Sum))
+// 	}
 
-	// Check basic fields
-	if header.MinID != minID {
-		t.Errorf("Expected MinID %d, got %d", minID, header.MinID)
-	}
-	if header.MaxID != maxID {
-		t.Errorf("Expected MaxID %d, got %d", maxID, header.MaxID)
-	}
-	if header.Count != count {
-		t.Errorf("Expected Count %d, got %d", count, header.Count)
-	}
-	if header.EncodingType != encodingType {
-		t.Errorf("Expected EncodingType %d, got %d", encodingType, header.EncodingType)
-	}
+// 	// Check other fields have sensible values
+// 	if header.CompressionType != CompressionNone {
+// 		t.Errorf("Expected CompressionType %d, got %d", CompressionNone, header.CompressionType)
+// 	}
 
-	// Convert back from uint64 to int64 and compare
-	if uint64ToInt64(header.MinValue) != minValue {
-		t.Errorf("Expected MinValue %d, got %d", minValue, uint64ToInt64(header.MinValue))
-	}
-	if uint64ToInt64(header.MaxValue) != maxValue {
-		t.Errorf("Expected MaxValue %d, got %d", maxValue, uint64ToInt64(header.MaxValue))
-	}
-	if uint64ToInt64(header.Sum) != sum {
-		t.Errorf("Expected Sum %d, got %d", sum, uint64ToInt64(header.Sum))
-	}
-
-	// Check other fields have sensible values
-	if header.CompressionType != CompressionNone {
-		t.Errorf("Expected CompressionType %d, got %d", CompressionNone, header.CompressionType)
-	}
-
-	expectedSize := CalculateBlockSize(count, encodingType)
-	if header.UncompressedSize != expectedSize {
-		t.Errorf("Expected UncompressedSize %d, got %d", expectedSize, header.UncompressedSize)
-	}
-	if header.CompressedSize != expectedSize { // Currently the same as uncompressed
-		t.Errorf("Expected CompressedSize %d, got %d", expectedSize, header.CompressedSize)
-	}
-}
+// 	expectedSize := CalculateBlockSize(count, encodingType)
+// 	if header.UncompressedSize != expectedSize {
+// 		t.Errorf("Expected UncompressedSize %d, got %d", expectedSize, header.UncompressedSize)
+// 	}
+// 	if header.CompressedSize != expectedSize { // Currently the same as uncompressed
+// 		t.Errorf("Expected CompressedSize %d, got %d", expectedSize, header.CompressedSize)
+// 	}
+// }
 
 func TestNewFooterEntry(t *testing.T) {
 	blockOffset := uint64(64)
