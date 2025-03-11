@@ -168,6 +168,166 @@ func (w *Writer) writeHeader() error {
 	return nil
 }
 
+// encodeIDs encodes the IDs based on the encoding type
+func (w *Writer) encodeIDs(ids []uint64) ([]uint64, [][]byte, uint32, error) {
+	fmt.Printf("Encoding IDs: %v\n", ids)
+	var encodedIDs []uint64
+	var encodedIdBytes [][]byte
+	var idSectionSize uint32
+
+	// First apply delta encoding if needed
+	switch w.encodingType {
+	case EncodingRaw, EncodingVarInt, EncodingVarIntValue:
+		// These encoding types don't use delta encoding for IDs
+		encodedIDs = make([]uint64, len(ids))
+		copy(encodedIDs, ids)
+	case EncodingDeltaID, EncodingDeltaBoth, EncodingVarIntID, EncodingVarIntBoth:
+		// These encoding types use delta encoding for IDs
+		encodedIDs = deltaEncode(ids)
+	default:
+		return nil, nil, 0, fmt.Errorf("unsupported encoding type: %d", w.encodingType)
+	}
+
+	// Then apply varint encoding if needed
+	switch w.encodingType {
+	case EncodingRaw, EncodingDeltaID, EncodingDeltaValue, EncodingDeltaBoth:
+		// Fixed-width encoding
+		idSectionSize = uint32(len(encodedIDs) * 8)
+	case EncodingVarInt, EncodingVarIntID, EncodingVarIntBoth, EncodingVarIntValue:
+		// Variable-width encoding
+		encodedIdBytes = make([][]byte, len(encodedIDs))
+		idSectionSize = 0
+		for i, id := range encodedIDs {
+			encodedIdBytes[i] = encodeVarInt(id)
+			idSize := uint32(len(encodedIdBytes[i]))
+			fmt.Printf("Encoded ID %d: %v (size: %d)\n", i, encodedIdBytes[i], idSize)
+			if idSize == 0 {
+				return nil, nil, 0, fmt.Errorf("encoded size of ID at index %d is 0", i)
+			}
+			idSectionSize += idSize
+		}
+		if idSectionSize == 0 && len(encodedIDs) > 0 {
+			return nil, nil, 0, fmt.Errorf("calculated ID section size is 0 with %d IDs", len(encodedIDs))
+		}
+	}
+
+	fmt.Printf("Encoded IDs: %v, ID Section Size: %d\n", encodedIDs, idSectionSize)
+	return encodedIDs, encodedIdBytes, idSectionSize, nil
+}
+
+// encodeValues encodes the values based on the encoding type
+func (w *Writer) encodeValues(values []int64) ([]int64, [][]byte, uint32, error) {
+	fmt.Printf("Encoding Values: %v\n", values)
+	var encodedValues []int64
+	var encodedValueBytes [][]byte
+	var valueSectionSize uint32
+
+	// First apply delta encoding if needed
+	switch w.encodingType {
+	case EncodingRaw, EncodingVarInt, EncodingVarIntID:
+		// These encoding types don't use delta encoding for values
+		encodedValues = make([]int64, len(values))
+		copy(encodedValues, values)
+	case EncodingDeltaValue, EncodingDeltaBoth, EncodingVarIntValue, EncodingVarIntBoth:
+		// These encoding types use delta encoding for values
+		encodedValues = deltaEncodeInt64(values)
+	default:
+		return nil, nil, 0, fmt.Errorf("unsupported encoding type: %d", w.encodingType)
+	}
+
+	// Then apply varint encoding if needed
+	switch w.encodingType {
+	case EncodingRaw, EncodingDeltaID, EncodingDeltaValue, EncodingDeltaBoth:
+		// Fixed-width encoding
+		valueSectionSize = uint32(len(encodedValues) * 8)
+	case EncodingVarInt, EncodingVarIntID, EncodingVarIntBoth, EncodingVarIntValue:
+		// Variable-width encoding
+		encodedValueBytes = make([][]byte, len(encodedValues))
+		valueSectionSize = 0
+		for i, val := range encodedValues {
+			encodedValueBytes[i] = encodeSignedVarInt(val)
+			valSize := uint32(len(encodedValueBytes[i]))
+			fmt.Printf("Encoded Value %d: %v (size: %d)\n", i, encodedValueBytes[i], valSize)
+			if valSize == 0 {
+				return nil, nil, 0, fmt.Errorf("encoded size of value at index %d is 0", i)
+			}
+			valueSectionSize += valSize
+		}
+		if valueSectionSize == 0 && len(encodedValues) > 0 {
+			return nil, nil, 0, fmt.Errorf("calculated value section size is 0 with %d values", len(encodedValues))
+		}
+	}
+
+	fmt.Printf("Encoded Values: %v, Value Section Size: %d\n", encodedValues, valueSectionSize)
+	return encodedValues, encodedValueBytes, valueSectionSize, nil
+}
+
+// writeBlockHeader writes the block header to the file
+func (w *Writer) writeBlockHeader(minID, maxID uint64, minValueU64, maxValueU64, sumU64 uint64, count uint32) error {
+	if err := binary.Write(w.file, binary.LittleEndian, minID); err != nil {
+		return fmt.Errorf("failed to write min ID: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, maxID); err != nil {
+		return fmt.Errorf("failed to write max ID: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, minValueU64); err != nil {
+		return fmt.Errorf("failed to write min value: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, maxValueU64); err != nil {
+		return fmt.Errorf("failed to write max value: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, sumU64); err != nil {
+		return fmt.Errorf("failed to write sum: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, count); err != nil {
+		return fmt.Errorf("failed to write count: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, w.encodingType); err != nil {
+		return fmt.Errorf("failed to write encoding type: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, uint32(CompressionNone)); err != nil {
+		return fmt.Errorf("failed to write compression type: %w", err)
+	}
+	return nil
+}
+
+// writeBlockFooter writes the block footer to the file
+func (w *Writer) writeBlockFooter(blockOffset, blockSize uint64, minID, maxID uint64, minValue, maxValue, sum int64, count uint32) error {
+	entry := NewFooterEntry(
+		blockOffset,
+		uint32(blockSize),
+		minID, maxID,
+		minValue, maxValue, sum,
+		count,
+	)
+
+	if err := binary.Write(w.file, binary.LittleEndian, entry.BlockOffset); err != nil {
+		return fmt.Errorf("failed to write block offset: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, entry.BlockSize); err != nil {
+		return fmt.Errorf("failed to write block size: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, entry.MinID); err != nil {
+		return fmt.Errorf("failed to write min ID: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, entry.MaxID); err != nil {
+		return fmt.Errorf("failed to write max ID: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, entry.MinValue); err != nil {
+		return fmt.Errorf("failed to write min value: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, entry.MaxValue); err != nil {
+		return fmt.Errorf("failed to write max value: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, entry.Sum); err != nil {
+		return fmt.Errorf("failed to write sum: %w", err)
+	}
+	if err := binary.Write(w.file, binary.LittleEndian, entry.Count); err != nil {
+		return fmt.Errorf("failed to write count: %w", err)
+	}
+	return nil
+}
+
 // WriteBlock writes a block of ID-value pairs
 func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	if len(ids) != len(values) {
@@ -178,41 +338,23 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 		return fmt.Errorf("cannot write empty block")
 	}
 
-	// Apply encoding based on the selected type
-	var encodedIDs []uint64
-	var encodedValues []int64
-	blockEncodingType := w.encodingType
+	// Determine if we need to use variable-length encoding
+	useVarIntForIDs := w.encodingType == EncodingVarInt ||
+		w.encodingType == EncodingVarIntID ||
+		w.encodingType == EncodingVarIntBoth
+	useVarIntForValues := w.encodingType == EncodingVarInt ||
+		w.encodingType == EncodingVarIntValue ||
+		w.encodingType == EncodingVarIntBoth
 
-	// Apply encoding based on the selected type
-	switch w.encodingType {
-	case EncodingRaw:
-		encodedIDs = ids
-		encodedValues = values
-	case EncodingDeltaID:
-		encodedIDs = deltaEncode(ids)
-		encodedValues = values
-	case EncodingDeltaValue:
-		encodedIDs = ids
-		encodedValues = deltaEncodeInt64(values)
-	case EncodingDeltaBoth:
-		encodedIDs = deltaEncode(ids)
-		encodedValues = deltaEncodeInt64(values)
-	case EncodingVarInt, EncodingVarIntID, EncodingVarIntValue, EncodingVarIntBoth:
-		// For variable-length encoding, we'll prepare the data below
-		// but we need to keep track of the encoding type
-		encodedIDs = ids
-		encodedValues = values
+	// Encode IDs and values
+	encodedIDs, encodedIdBytes, idSectionSize, err := w.encodeIDs(ids)
+	if err != nil {
+		return err
+	}
 
-		// For combined VarInt+Delta encoding
-		if w.encodingType == EncodingVarIntBoth {
-			encodedIDs = deltaEncode(ids)
-			encodedValues = deltaEncodeInt64(values)
-		}
-	default:
-		// Fallback to raw for unknown encoding
-		encodedIDs = ids
-		encodedValues = values
-		blockEncodingType = EncodingRaw
+	encodedValues, encodedValueBytes, valueSectionSize, err := w.encodeValues(values)
+	if err != nil {
+		return err
 	}
 
 	// Calculate statistics for the block using ORIGINAL values, not encoded values
@@ -236,124 +378,9 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	maxValueU64 := int64ToUint64(maxValue)
 	sumU64 := int64ToUint64(sum)
 
-	// Write block header fields
-	if err := binary.Write(w.file, binary.LittleEndian, minID); err != nil {
-		return fmt.Errorf("failed to write min ID: %w", err)
-	}
-	if err := binary.Write(w.file, binary.LittleEndian, maxID); err != nil {
-		return fmt.Errorf("failed to write max ID: %w", err)
-	}
-	if err := binary.Write(w.file, binary.LittleEndian, minValueU64); err != nil {
-		return fmt.Errorf("failed to write min value: %w", err)
-	}
-	if err := binary.Write(w.file, binary.LittleEndian, maxValueU64); err != nil {
-		return fmt.Errorf("failed to write max value: %w", err)
-	}
-	if err := binary.Write(w.file, binary.LittleEndian, sumU64); err != nil {
-		return fmt.Errorf("failed to write sum: %w", err)
-	}
-	if err := binary.Write(w.file, binary.LittleEndian, count); err != nil {
-		return fmt.Errorf("failed to write count: %w", err)
-	}
-	if err := binary.Write(w.file, binary.LittleEndian, blockEncodingType); err != nil {
-		return fmt.Errorf("failed to write encoding type: %w", err)
-	}
-	if err := binary.Write(w.file, binary.LittleEndian, uint32(CompressionNone)); err != nil {
-		return fmt.Errorf("failed to write compression type: %w", err)
-	}
-
-	// Calculate sizes based on encoding
-	// For varInt encoding, we need to precompute the encoded values array
-	// so we know the exact size
-	var encodedIdBytes [][]byte
-	var encodedValueBytes [][]byte
-	var idSectionSize uint32
-	var valueSectionSize uint32
-
-	// Determine if we need to use variable-length encoding
-	useVarIntForIDs := blockEncodingType == EncodingVarInt ||
-		blockEncodingType == EncodingVarIntID ||
-		blockEncodingType == EncodingVarIntBoth
-	useVarIntForValues := blockEncodingType == EncodingVarInt ||
-		blockEncodingType == EncodingVarIntValue ||
-		blockEncodingType == EncodingVarIntBoth
-
-	if useVarIntForIDs {
-		// Precompute the encoded bytes for each ID
-		encodedIdBytes = make([][]byte, len(encodedIDs))
-		idSectionSize = 0
-
-		// Debug output
-		fmt.Printf("Encoding %d IDs with variable-length encoding\n", len(encodedIDs))
-
-		for i, id := range encodedIDs {
-			// Encode this ID as varint
-			encodedIdBytes[i] = encodeVarInt(id)
-			// Add the size of this encoded ID
-			idSize := uint32(len(encodedIdBytes[i]))
-
-			if idSize == 0 {
-				// This should never happen - a minimum of 1 byte is needed for varint
-				return fmt.Errorf("encoded size of ID at index %d is 0", i)
-			}
-			idSectionSize += idSize
-
-			// Debug output for first few and last few IDs
-			if i < 5 || i > len(encodedIDs)-5 {
-				fmt.Printf("ID[%d]: %d, encoded size: %d bytes, running total: %d\n",
-					i, id, idSize, idSectionSize)
-			}
-		}
-		// Sanity check
-		if idSectionSize == 0 && len(encodedIDs) > 0 {
-			// Should never happen if the loop ran properly
-			return fmt.Errorf("calculated ID section size is 0 with %d IDs", len(encodedIDs))
-		}
-
-		// Debug output
-		fmt.Printf("Total ID section size: %d bytes for %d IDs\n", idSectionSize, len(encodedIDs))
-
-	} else {
-		// Fixed 8 bytes per ID
-		idSectionSize = uint32(count * 8)
-	}
-
-	if useVarIntForValues {
-		// Precompute the encoded bytes for each value
-		encodedValueBytes = make([][]byte, len(encodedValues))
-		valueSectionSize = 0
-
-		// Debug output
-		fmt.Printf("Encoding %d values with variable-length encoding\n", len(encodedValues))
-
-		for i, val := range encodedValues {
-			// Encode this value as signed varint
-			encodedValueBytes[i] = encodeSignedVarInt(val)
-			// Add the size of this encoded value
-			valSize := uint32(len(encodedValueBytes[i]))
-			if valSize == 0 {
-				// This should never happen - a minimum of 1 byte is needed for varint
-				return fmt.Errorf("encoded size of value at index %d is 0", i)
-			}
-			valueSectionSize += valSize
-
-			// Debug output for first few and last few values
-			if i < 5 || i > len(encodedValues)-5 {
-				fmt.Printf("Value[%d]: %d, encoded size: %d bytes, running total: %d\n",
-					i, val, valSize, valueSectionSize)
-			}
-		}
-		// Sanity check
-		if valueSectionSize == 0 && len(encodedValues) > 0 {
-			// Should never happen if the loop ran properly
-			return fmt.Errorf("calculated value section size is 0 with %d values", len(encodedValues))
-		}
-
-		// Debug output
-		fmt.Printf("Total value section size: %d bytes for %d values\n", valueSectionSize, len(encodedValues))
-	} else {
-		// Fixed 8 bytes per value
-		valueSectionSize = uint32(count * 8)
+	// Write block header
+	if err := w.writeBlockHeader(minID, maxID, minValueU64, maxValueU64, sumU64, count); err != nil {
+		return err
 	}
 
 	// Calculate total data size
@@ -361,7 +388,7 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	_ = dataSize // Used for debugging, can be removed in production
 
 	// Use the updated CalculateBlockSize function
-	uncompressedSize := CalculateBlockSize(count, blockEncodingType)
+	uncompressedSize := CalculateBlockSize(count, w.encodingType)
 	compressedSize := uncompressedSize // Same as uncompressed for now
 
 	if err := binary.Write(w.file, binary.LittleEndian, uncompressedSize); err != nil {
@@ -482,8 +509,8 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	}
 
 	// Calculate actual block size
-	blockSize := uint32(blockEnd - blockStart)
-	w.blockSizes = append(w.blockSizes, blockSize)
+	blockSize := uint64(blockEnd - blockStart)
+	w.blockSizes = append(w.blockSizes, uint32(blockSize))
 
 	// Store block statistics for footer
 	w.blockStats = append(w.blockStats, BlockStats{
@@ -598,39 +625,9 @@ func (w *Writer) Finalize() error {
 				return fmt.Errorf("failed to seek to end: %w", err)
 			}
 
-			// Create footer entry
-			entry := NewFooterEntry(
-				blockOffset,
-				blockSize,
-				minID, maxID,
-				minValue, maxValue, sum,
-				count,
-			)
-
-			// Write entry to footer
-			if err := binary.Write(w.file, binary.LittleEndian, entry.BlockOffset); err != nil {
-				return fmt.Errorf("failed to write block offset: %w", err)
-			}
-			if err := binary.Write(w.file, binary.LittleEndian, entry.BlockSize); err != nil {
-				return fmt.Errorf("failed to write block size: %w", err)
-			}
-			if err := binary.Write(w.file, binary.LittleEndian, entry.MinID); err != nil {
-				return fmt.Errorf("failed to write min ID: %w", err)
-			}
-			if err := binary.Write(w.file, binary.LittleEndian, entry.MaxID); err != nil {
-				return fmt.Errorf("failed to write max ID: %w", err)
-			}
-			if err := binary.Write(w.file, binary.LittleEndian, entry.MinValue); err != nil {
-				return fmt.Errorf("failed to write min value: %w", err)
-			}
-			if err := binary.Write(w.file, binary.LittleEndian, entry.MaxValue); err != nil {
-				return fmt.Errorf("failed to write max value: %w", err)
-			}
-			if err := binary.Write(w.file, binary.LittleEndian, entry.Sum); err != nil {
-				return fmt.Errorf("failed to write sum: %w", err)
-			}
-			if err := binary.Write(w.file, binary.LittleEndian, entry.Count); err != nil {
-				return fmt.Errorf("failed to write count: %w", err)
+			// Write block footer
+			if err := w.writeBlockFooter(blockOffset, uint64(blockSize), minID, maxID, minValue, maxValue, sum, count); err != nil {
+				return err
 			}
 		}
 	}
