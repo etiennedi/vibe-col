@@ -467,10 +467,29 @@ func (r *Reader) BlockCount() uint64 {
 	return r.header.BlockCount
 }
 
-// Aggregate aggregates all blocks and returns the result
+// AggregateOptions contains options for the aggregation process
+type AggregateOptions struct {
+	// SkipPreCalculated forces the aggregation to read all values from blocks
+	// instead of using pre-calculated values from the footer
+	SkipPreCalculated bool
+}
+
+// DefaultAggregateOptions returns the default options for aggregation
+func DefaultAggregateOptions() AggregateOptions {
+	return AggregateOptions{
+		SkipPreCalculated: false,
+	}
+}
+
+// Aggregate aggregates all blocks and returns the result using default options
 func (r *Reader) Aggregate() AggregateResult {
-	// If we have a footer with block statistics, use it for efficient aggregation
-	if len(r.blockIndex) > 0 {
+	return r.AggregateWithOptions(DefaultAggregateOptions())
+}
+
+// AggregateWithOptions aggregates all blocks with the specified options and returns the result
+func (r *Reader) AggregateWithOptions(opts AggregateOptions) AggregateResult {
+	// If we have a footer with block statistics and we're not skipping pre-calculated values, use it for efficient aggregation
+	if len(r.blockIndex) > 0 && !opts.SkipPreCalculated {
 		var count int
 		var min int64 = 9223372036854775807  // Max int64
 		var max int64 = -9223372036854775808 // Min int64

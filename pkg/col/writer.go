@@ -215,11 +215,12 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 		blockEncodingType = EncodingRaw
 	}
 
-	// Calculate statistics for the block
-	minID, maxID := calculateMinMaxUint64(encodedIDs)
-	minValue, maxValue := calculateMinMaxInt64(encodedValues)
-	sum := calculateSumInt64(encodedValues)
-	count := uint32(len(encodedIDs))
+	// Calculate statistics for the block using ORIGINAL values, not encoded values
+	// This ensures that aggregations are correct regardless of encoding
+	minID, maxID := calculateMinMaxUint64(ids)
+	minValue, maxValue := calculateMinMaxInt64(values)
+	sum := calculateSumInt64(values)
+	count := uint32(len(ids))
 
 	// Write block header (64 bytes)
 	blockStart, err := w.file.Seek(0, io.SeekCurrent)

@@ -1,6 +1,7 @@
 package col
 
 import (
+	"math"
 	"math/rand"
 	"os"
 	"testing"
@@ -469,5 +470,161 @@ func TestVarintEncodingCompression_RealWorldData(t *testing.T) {
 		if values[i] != gotValues[i] {
 			t.Errorf("Value mismatch at index %d: want %d, got %d", i, values[i], gotValues[i])
 		}
+	}
+}
+
+// TestAggregateWithoutPreCalculated verifies that aggregation works correctly
+// when skipping pre-calculated values in the footer
+func TestAggregateWithoutPreCalculated(t *testing.T) {
+	// Create a temporary file for testing
+	tempFile := "test_aggregate_no_precalc.col"
+	defer os.Remove(tempFile)
+
+	// Generate 10k values with some variability
+	const numValues = 10000
+	ids := make([]uint64, numValues)
+	values := make([]int64, numValues)
+
+	// Track expected aggregation results
+	var expectedSum int64
+	var expectedMin int64 = 9223372036854775807  // Max int64
+	var expectedMax int64 = -9223372036854775808 // Min int64
+
+	// Generate data with variable patterns
+	r := rand.New(rand.NewSource(42)) // Use fixed seed for reproducibility
+	for i := 0; i < numValues; i++ {
+		// Generate IDs with some gaps
+		if i == 0 {
+			ids[i] = 1000
+		} else {
+			// Add a random gap between 1 and 10
+			ids[i] = ids[i-1] + uint64(r.Intn(10)+1)
+		}
+
+		// Generate values with both positive and negative numbers
+		// Use a mix of small and large values
+		var val int64
+		switch r.Intn(5) {
+		case 0:
+			// Small negative (-100 to -1)
+			val = -int64(r.Intn(100) + 1)
+		case 1:
+			// Small positive (1 to 100)
+			val = int64(r.Intn(100) + 1)
+		case 2:
+			// Medium negative (-10000 to -101)
+			val = -int64(r.Intn(9900) + 101)
+		case 3:
+			// Medium positive (101 to 10000)
+			val = int64(r.Intn(9900) + 101)
+		case 4:
+			// Large (could be positive or negative, up to ±1M)
+			val = int64(r.Intn(2000000) - 1000000)
+		}
+		values[i] = val
+
+		// Update expected aggregation values
+		expectedSum += val
+		if val < expectedMin {
+			expectedMin = val
+		}
+		if val > expectedMax {
+			expectedMax = val
+		}
+	}
+
+	// Create a writer with variable-length encoding
+	writer, err := NewWriter(tempFile, WithEncoding(EncodingVarIntBoth))
+	if err != nil {
+		t.Fatalf("Failed to create writer: %v", err)
+	}
+
+	// Write the data in multiple blocks (1000 values per block)
+	const blockSize = 1000
+	for i := 0; i < numValues; i += blockSize {
+		end := i + blockSize
+		if end > numValues {
+			end = numValues
+		}
+
+		blockIDs := ids[i:end]
+		blockValues := values[i:end]
+
+		if err := writer.WriteBlock(blockIDs, blockValues); err != nil {
+			t.Fatalf("Failed to write block at index %d: %v", i, err)
+		}
+	}
+
+	// Finalize and close the file
+	if err := writer.FinalizeAndClose(); err != nil {
+		t.Fatalf("Failed to finalize file: %v", err)
+	}
+
+	// Open the file for reading
+	reader, err := NewReader(tempFile)
+	if err != nil {
+		t.Fatalf("Failed to open file: %v", err)
+	}
+	defer reader.Close()
+
+	// Verify file metadata
+	if reader.Version() != Version {
+		t.Errorf("Expected version %d, got %d", Version, reader.Version())
+	}
+	if reader.BlockCount() != uint64((numValues+blockSize-1)/blockSize) {
+		t.Errorf("Expected %d blocks, got %d", (numValues+blockSize-1)/blockSize, reader.BlockCount())
+	}
+
+	// Get aggregation using pre-calculated values (default)
+	precalcAgg := reader.Aggregate()
+
+	// Get aggregation by reading all values
+	directAgg := reader.AggregateWithOptions(AggregateOptions{SkipPreCalculated: true})
+
+	// Verify both methods produce the same results
+	t.Logf("Pre-calculated aggregation: Count=%d, Min=%d, Max=%d, Sum=%d, Avg=%.2f",
+		precalcAgg.Count, precalcAgg.Min, precalcAgg.Max, precalcAgg.Sum, precalcAgg.Avg)
+
+	t.Logf("Direct aggregation: Count=%d, Min=%d, Max=%d, Sum=%d, Avg=%.2f",
+		directAgg.Count, directAgg.Min, directAgg.Max, directAgg.Sum, directAgg.Avg)
+
+	// Verify against expected values
+	t.Logf("Expected values: Count=%d, Min=%d, Max=%d, Sum=%d, Avg=%.2f",
+		numValues, expectedMin, expectedMax, expectedSum, float64(expectedSum)/float64(numValues))
+
+	// Compare pre-calculated with direct
+	if precalcAgg.Count != directAgg.Count {
+		t.Errorf("Count mismatch: pre-calculated=%d, direct=%d", precalcAgg.Count, directAgg.Count)
+	}
+	if precalcAgg.Min != directAgg.Min {
+		t.Errorf("Min mismatch: pre-calculated=%d, direct=%d", precalcAgg.Min, directAgg.Min)
+	}
+	if precalcAgg.Max != directAgg.Max {
+		t.Errorf("Max mismatch: pre-calculated=%d, direct=%d", precalcAgg.Max, directAgg.Max)
+	}
+	if precalcAgg.Sum != directAgg.Sum {
+		t.Errorf("Sum mismatch: pre-calculated=%d, direct=%d", precalcAgg.Sum, directAgg.Sum)
+	}
+	if precalcAgg.Avg != directAgg.Avg {
+		t.Errorf("Avg mismatch: pre-calculated=%.2f, direct=%.2f", precalcAgg.Avg, directAgg.Avg)
+	}
+
+	// Compare with expected values
+	if precalcAgg.Count != numValues {
+		t.Errorf("Count incorrect: expected=%d, got=%d", numValues, precalcAgg.Count)
+	}
+	if precalcAgg.Min != expectedMin {
+		t.Errorf("Min incorrect: expected=%d, got=%d", expectedMin, precalcAgg.Min)
+	}
+	if precalcAgg.Max != expectedMax {
+		t.Errorf("Max incorrect: expected=%d, got=%d", expectedMax, precalcAgg.Max)
+	}
+	if precalcAgg.Sum != expectedSum {
+		t.Errorf("Sum incorrect: expected=%d, got=%d", expectedSum, precalcAgg.Sum)
+	}
+
+	expectedAvg := float64(expectedSum) / float64(numValues)
+	if math.Abs(precalcAgg.Avg-expectedAvg) > 0.001 {
+		t.Errorf("Avg incorrect: expected=%.2f, got=%.2f", expectedAvg, precalcAgg.Avg)
 	}
 }
