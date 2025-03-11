@@ -203,92 +203,58 @@ func (w *Writer) writeHeader() error {
 	return nil
 }
 
-// encodeIDs encodes the IDs based on the encoding type
-func (w *Writer) encodeIDs(ids []uint64) ([]uint64, [][]byte, uint32, error) {
-	var encodedIDs []uint64
-	var encodedIdBytes [][]byte
-	var idSectionSize uint32
+// encodeData is a helper function to encode data based on the encoding type
+func encodeData[T any](encodingType uint32, data []T, deltaEncodeFunc func([]T) []T, encodeVarIntFunc func(T) []byte) ([]T, [][]byte, uint32, error) {
+	var encodedData []T
+	var encodedDataBytes [][]byte
+	var sectionSize uint32
 
 	// First apply delta encoding if needed
-	switch w.encodingType {
-	case EncodingRaw, EncodingVarInt, EncodingVarIntValue:
-		// These encoding types don't use delta encoding for IDs
-		encodedIDs = make([]uint64, len(ids))
-		copy(encodedIDs, ids)
-	case EncodingDeltaID, EncodingDeltaBoth, EncodingVarIntID, EncodingVarIntBoth:
-		// These encoding types use delta encoding for IDs
-		encodedIDs = deltaEncode(ids)
+	switch encodingType {
+	case EncodingRaw, EncodingVarInt, EncodingVarIntID:
+		// These encoding types don't use delta encoding
+		encodedData = make([]T, len(data))
+		copy(encodedData, data)
+	case EncodingDeltaID, EncodingDeltaValue, EncodingDeltaBoth, EncodingVarIntValue, EncodingVarIntBoth:
+		// These encoding types use delta encoding
+		encodedData = deltaEncodeFunc(data)
 	default:
-		return nil, nil, 0, fmt.Errorf("unsupported encoding type: %d", w.encodingType)
+		return nil, nil, 0, fmt.Errorf("unsupported encoding type: %d", encodingType)
 	}
 
 	// Then apply varint encoding if needed
-	switch w.encodingType {
+	switch encodingType {
 	case EncodingRaw, EncodingDeltaID, EncodingDeltaValue, EncodingDeltaBoth:
 		// Fixed-width encoding
-		idSectionSize = uint32(len(encodedIDs) * 8)
+		sectionSize = uint32(len(encodedData) * 8)
 	case EncodingVarInt, EncodingVarIntID, EncodingVarIntBoth, EncodingVarIntValue:
 		// Variable-width encoding
-		encodedIdBytes = make([][]byte, len(encodedIDs))
-		idSectionSize = 0
-		for i, id := range encodedIDs {
-			encodedIdBytes[i] = encodeVarInt(id)
-			idSize := uint32(len(encodedIdBytes[i]))
-			if idSize == 0 {
-				return nil, nil, 0, fmt.Errorf("encoded size of ID at index %d is 0", i)
+		encodedDataBytes = make([][]byte, len(encodedData))
+		sectionSize = 0
+		for i, d := range encodedData {
+			encodedDataBytes[i] = encodeVarIntFunc(d)
+			dataSize := uint32(len(encodedDataBytes[i]))
+			if dataSize == 0 {
+				return nil, nil, 0, fmt.Errorf("encoded size of data at index %d is 0", i)
 			}
-			idSectionSize += idSize
+			sectionSize += dataSize
 		}
-		if idSectionSize == 0 && len(encodedIDs) > 0 {
-			return nil, nil, 0, fmt.Errorf("calculated ID section size is 0 with %d IDs", len(encodedIDs))
+		if sectionSize == 0 && len(encodedData) > 0 {
+			return nil, nil, 0, fmt.Errorf("calculated section size is 0 with %d items", len(encodedData))
 		}
 	}
 
-	return encodedIDs, encodedIdBytes, idSectionSize, nil
+	return encodedData, encodedDataBytes, sectionSize, nil
+}
+
+// encodeIDs encodes the IDs based on the encoding type
+func (w *Writer) encodeIDs(ids []uint64) ([]uint64, [][]byte, uint32, error) {
+	return encodeData(w.encodingType, ids, deltaEncode, encodeVarInt)
 }
 
 // encodeValues encodes the values based on the encoding type
 func (w *Writer) encodeValues(values []int64) ([]int64, [][]byte, uint32, error) {
-	var encodedValues []int64
-	var encodedValueBytes [][]byte
-	var valueSectionSize uint32
-
-	// First apply delta encoding if needed
-	switch w.encodingType {
-	case EncodingRaw, EncodingVarInt, EncodingVarIntID:
-		// These encoding types don't use delta encoding for values
-		encodedValues = make([]int64, len(values))
-		copy(encodedValues, values)
-	case EncodingDeltaValue, EncodingDeltaBoth, EncodingVarIntValue, EncodingVarIntBoth:
-		// These encoding types use delta encoding for values
-		encodedValues = deltaEncodeInt64(values)
-	default:
-		return nil, nil, 0, fmt.Errorf("unsupported encoding type: %d", w.encodingType)
-	}
-
-	// Then apply varint encoding if needed
-	switch w.encodingType {
-	case EncodingRaw, EncodingDeltaID, EncodingDeltaValue, EncodingDeltaBoth:
-		// Fixed-width encoding
-		valueSectionSize = uint32(len(encodedValues) * 8)
-	case EncodingVarInt, EncodingVarIntID, EncodingVarIntBoth, EncodingVarIntValue:
-		// Variable-width encoding
-		encodedValueBytes = make([][]byte, len(encodedValues))
-		valueSectionSize = 0
-		for i, val := range encodedValues {
-			encodedValueBytes[i] = encodeSignedVarInt(val)
-			valSize := uint32(len(encodedValueBytes[i]))
-			if valSize == 0 {
-				return nil, nil, 0, fmt.Errorf("encoded size of value at index %d is 0", i)
-			}
-			valueSectionSize += valSize
-		}
-		if valueSectionSize == 0 && len(encodedValues) > 0 {
-			return nil, nil, 0, fmt.Errorf("calculated value section size is 0 with %d values", len(encodedValues))
-		}
-	}
-
-	return encodedValues, encodedValueBytes, valueSectionSize, nil
+	return encodeData(w.encodingType, values, deltaEncodeInt64, encodeSignedVarInt)
 }
 
 // writeBlockHeader writes the block header to the file
