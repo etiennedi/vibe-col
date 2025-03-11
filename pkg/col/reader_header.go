@@ -7,64 +7,45 @@ import (
 
 // readHeader reads the file header from the file
 func (r *Reader) readHeader() error {
-	// Read header fields using ReadAt
-	var err error
-	var offset int64 = 0
+	// Read the entire header in one call (64 bytes)
+	headerBuf, err := r.readBytesAt(0, headerSize)
+	if err != nil {
+		return fmt.Errorf("failed to read header: %w", err)
+	}
+
+	// Extract fields from the buffer
+	offset := 0
 
 	// Read magic number
-	r.header.Magic, err = r.readUint64At(offset)
-	if err != nil {
-		return fmt.Errorf("failed to read magic number: %w", err)
-	}
+	r.header.Magic = readBufferedUint64(headerBuf, offset)
 	offset += 8
 
 	// Read version
-	r.header.Version, err = r.readUint32At(offset)
-	if err != nil {
-		return fmt.Errorf("failed to read version: %w", err)
-	}
+	r.header.Version = readBufferedUint32(headerBuf, offset)
 	offset += 4
 
 	// Read column type
-	r.header.ColumnType, err = r.readUint32At(offset)
-	if err != nil {
-		return fmt.Errorf("failed to read column type: %w", err)
-	}
+	r.header.ColumnType = readBufferedUint32(headerBuf, offset)
 	offset += 4
 
 	// Read block count
-	r.header.BlockCount, err = r.readUint64At(offset)
-	if err != nil {
-		return fmt.Errorf("failed to read block count: %w", err)
-	}
+	r.header.BlockCount = readBufferedUint64(headerBuf, offset)
 	offset += 8
 
 	// Read block size target
-	r.header.BlockSizeTarget, err = r.readUint32At(offset)
-	if err != nil {
-		return fmt.Errorf("failed to read block size target: %w", err)
-	}
+	r.header.BlockSizeTarget = readBufferedUint32(headerBuf, offset)
 	offset += 4
 
 	// Read compression type
-	r.header.CompressionType, err = r.readUint32At(offset)
-	if err != nil {
-		return fmt.Errorf("failed to read compression type: %w", err)
-	}
+	r.header.CompressionType = readBufferedUint32(headerBuf, offset)
 	offset += 4
 
 	// Read encoding type
-	r.header.EncodingType, err = r.readUint32At(offset)
-	if err != nil {
-		return fmt.Errorf("failed to read encoding type: %w", err)
-	}
+	r.header.EncodingType = readBufferedUint32(headerBuf, offset)
 	offset += 4
 
 	// Read creation time
-	r.header.CreationTime, err = r.readUint64At(offset)
-	if err != nil {
-		return fmt.Errorf("failed to read creation time: %w", err)
-	}
+	r.header.CreationTime = readBufferedUint64(headerBuf, offset)
 
 	// Validate header
 	if r.header.Magic != MagicNumber {
@@ -84,27 +65,17 @@ func (r *Reader) readFooter() error {
 		return fmt.Errorf("file too small for footer: %d bytes", r.fileSize)
 	}
 
-	// Read footer metadata from the end of the file
+	// Read footer metadata from the end of the file in one call
 	footerMetaOffset := r.fileSize - 24
-
-	// Read footer size
-	var err error
-	r.footerMeta.FooterSize, err = r.readUint64At(footerMetaOffset)
+	footerMetaBuf, err := r.readBytesAt(footerMetaOffset, 24)
 	if err != nil {
-		return fmt.Errorf("failed to read footer size: %w", err)
+		return fmt.Errorf("failed to read footer metadata: %w", err)
 	}
 
-	// Read checksum
-	r.footerMeta.Checksum, err = r.readUint64At(footerMetaOffset + 8)
-	if err != nil {
-		return fmt.Errorf("failed to read checksum: %w", err)
-	}
-
-	// Read footer magic
-	r.footerMeta.Magic, err = r.readUint64At(footerMetaOffset + 16)
-	if err != nil {
-		return fmt.Errorf("failed to read footer magic: %w", err)
-	}
+	// Extract fields from the buffer
+	r.footerMeta.FooterSize = readBufferedUint64(footerMetaBuf, 0)
+	r.footerMeta.Checksum = readBufferedUint64(footerMetaBuf, 8)
+	r.footerMeta.Magic = readBufferedUint64(footerMetaBuf, 16)
 
 	// Validate footer metadata
 	if r.footerMeta.Magic != MagicNumber {
@@ -117,7 +88,7 @@ func (r *Reader) readFooter() error {
 		return fmt.Errorf("invalid footer size: %d", r.footerMeta.FooterSize)
 	}
 
-	// Read block index count
+	// Read block index count (first 4 bytes of footer)
 	blockIndexCountBuf, err := r.readBytesAt(footerStart, 4)
 	if err != nil {
 		return fmt.Errorf("failed to read block index count: %w", err)
@@ -132,69 +103,30 @@ func (r *Reader) readFooter() error {
 		}
 	}
 
-	// Read block index
+	// Calculate the size of the block index
+	// Each entry is 56 bytes (8+4+8+8+8+8+8+4)
+	blockIndexSize := int(blockIndexCount) * 56
+
+	// Read the entire block index in one call
+	blockIndexBuf, err := r.readBytesAt(footerStart+4, blockIndexSize)
+	if err != nil {
+		return fmt.Errorf("failed to read block index: %w", err)
+	}
+
+	// Parse the block index entries
 	r.blockIndex = make([]FooterEntry, blockIndexCount)
-	offset := footerStart + 4 // Start after the block index count
-
 	for i := uint32(0); i < blockIndexCount; i++ {
-		// Read each field of the footer entry
-		blockOffset, err := r.readUint64At(offset)
-		if err != nil {
-			return fmt.Errorf("failed to read block offset: %w", err)
-		}
-		offset += 8
-
-		blockSize, err := r.readUint32At(offset)
-		if err != nil {
-			return fmt.Errorf("failed to read block size: %w", err)
-		}
-		offset += 4
-
-		minID, err := r.readUint64At(offset)
-		if err != nil {
-			return fmt.Errorf("failed to read min ID: %w", err)
-		}
-		offset += 8
-
-		maxID, err := r.readUint64At(offset)
-		if err != nil {
-			return fmt.Errorf("failed to read max ID: %w", err)
-		}
-		offset += 8
-
-		minValue, err := r.readUint64At(offset)
-		if err != nil {
-			return fmt.Errorf("failed to read min value: %w", err)
-		}
-		offset += 8
-
-		maxValue, err := r.readUint64At(offset)
-		if err != nil {
-			return fmt.Errorf("failed to read max value: %w", err)
-		}
-		offset += 8
-
-		sum, err := r.readUint64At(offset)
-		if err != nil {
-			return fmt.Errorf("failed to read sum: %w", err)
-		}
-		offset += 8
-
-		count, err := r.readUint32At(offset)
-		if err != nil {
-			return fmt.Errorf("failed to read count: %w", err)
-		}
-		offset += 4
+		entryOffset := i * 56
 
 		r.blockIndex[i] = FooterEntry{
-			BlockOffset: blockOffset,
-			BlockSize:   blockSize,
-			MinID:       minID,
-			MaxID:       maxID,
-			MinValue:    minValue,
-			MaxValue:    maxValue,
-			Sum:         sum,
-			Count:       count,
+			BlockOffset: readBufferedUint64(blockIndexBuf, int(entryOffset)),
+			BlockSize:   readBufferedUint32(blockIndexBuf, int(entryOffset+8)),
+			MinID:       readBufferedUint64(blockIndexBuf, int(entryOffset+12)),
+			MaxID:       readBufferedUint64(blockIndexBuf, int(entryOffset+20)),
+			MinValue:    readBufferedUint64(blockIndexBuf, int(entryOffset+28)),
+			MaxValue:    readBufferedUint64(blockIndexBuf, int(entryOffset+36)),
+			Sum:         readBufferedUint64(blockIndexBuf, int(entryOffset+44)),
+			Count:       readBufferedUint32(blockIndexBuf, int(entryOffset+52)),
 		}
 	}
 

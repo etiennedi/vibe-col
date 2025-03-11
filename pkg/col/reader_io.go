@@ -36,3 +36,13 @@ func (r *Reader) readUint32At(offset int64) (uint32, error) {
 	}
 	return binary.LittleEndian.Uint32(buf), nil
 }
+
+// readBufferedUint64 reads a uint64 from a buffer at a specific offset
+func readBufferedUint64(buf []byte, offset int) uint64 {
+	return binary.LittleEndian.Uint64(buf[offset : offset+8])
+}
+
+// readBufferedUint32 reads a uint32 from a buffer at a specific offset
+func readBufferedUint32(buf []byte, offset int) uint32 {
+	return binary.LittleEndian.Uint32(buf[offset : offset+4])
+}

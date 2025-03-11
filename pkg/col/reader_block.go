@@ -17,18 +17,22 @@ func (r *Reader) readBlock(blockIndex int) ([]uint64, []int64, error) {
 	blockSize := int64(r.blockIndex[blockIndex].BlockSize)
 	count := int(r.blockIndex[blockIndex].Count)
 
-	// Skip the block header and read the block layout (16 bytes)
-	layoutOffset := blockOffset + blockHeaderSize
-	layoutBuf, err := r.readBytesAt(layoutOffset, 16)
+	// Read the entire block data in one call (excluding the block header)
+	// We need to read the layout section (16 bytes) and the data sections
+	dataOffset := blockOffset + blockHeaderSize
+	dataSize := int(blockSize) - blockHeaderSize
+
+	// Read all data after the header in one call
+	blockData, err := r.readBytesAt(dataOffset, dataSize)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read block layout: %w", err)
+		return nil, nil, fmt.Errorf("failed to read block data: %w", err)
 	}
 
-	// Parse the layout
-	idSectionOffset := binary.LittleEndian.Uint32(layoutBuf[0:4])
-	idSectionSize := binary.LittleEndian.Uint32(layoutBuf[4:8])
-	valueSectionOffset := binary.LittleEndian.Uint32(layoutBuf[8:12])
-	valueSectionSize := binary.LittleEndian.Uint32(layoutBuf[12:16])
+	// Parse the layout section (first 16 bytes)
+	idSectionOffset := binary.LittleEndian.Uint32(blockData[0:4])
+	idSectionSize := binary.LittleEndian.Uint32(blockData[4:8])
+	valueSectionOffset := binary.LittleEndian.Uint32(blockData[8:12])
+	valueSectionSize := binary.LittleEndian.Uint32(blockData[12:16])
 
 	// Validate header values
 	if idSectionSize == 0 {
@@ -38,29 +42,22 @@ func (r *Reader) readBlock(blockIndex int) ([]uint64, []int64, error) {
 		return nil, nil, fmt.Errorf("Value section size in header is 0")
 	}
 
-	// Calculate absolute offsets for ID and value sections
-	dataSectionStart := layoutOffset + 16
-	absoluteIdOffset := dataSectionStart + int64(idSectionOffset)
-	absoluteValueOffset := dataSectionStart + int64(valueSectionOffset)
+	// Extract ID and value sections from the buffer
+	// The layout section is 16 bytes, followed by the data sections
+	idStart := 16 + int(idSectionOffset)
+	idEnd := idStart + int(idSectionSize)
 
-	// Read ID section
-	idBytes, err := r.readBytesAt(absoluteIdOffset, int(idSectionSize))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read ID section: %w", err)
+	valueStart := 16 + int(valueSectionOffset)
+	valueEnd := valueStart + int(valueSectionSize)
+
+	// Validate buffer boundaries
+	if idEnd > len(blockData) || valueEnd > len(blockData) {
+		return nil, nil, fmt.Errorf("section boundaries exceed block data size")
 	}
 
-	// Read value section
-	valueBytes, err := r.readBytesAt(absoluteValueOffset, int(valueSectionSize))
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read value section: %w", err)
-	}
-
-	// Verify we're not reading beyond the block size
-	totalBytesRead := blockHeaderSize + 16 + int64(idSectionSize) + int64(valueSectionSize)
-	if totalBytesRead > blockSize {
-		return nil, nil, fmt.Errorf("read beyond block end: read %d bytes, block size is %d",
-			totalBytesRead, blockSize)
-	}
+	// Extract the sections
+	idBytes := blockData[idStart:idEnd]
+	valueBytes := blockData[valueStart:valueEnd]
 
 	// Decode IDs and values
 	ids, values, err := decodeBlockData(idBytes, valueBytes, count, r.header.EncodingType)
