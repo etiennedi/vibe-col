@@ -259,10 +259,17 @@ func (r *Reader) readBlock(blockIndex int) ([]uint64, []int64, error) {
 
 					// If there are more available bytes than the reported value section size,
 					// adjust the value section size accordingly, but be cautious
-					if availableBytes > int64(valueSectionSize) && availableBytes < 10000 { // Sanity check
-						fmt.Printf("Adjusting value section size: reported=%d, available=%d\n",
-							valueSectionSize, availableBytes)
-						valueSectionSize = uint32(availableBytes)
+					if availableBytes > int64(valueSectionSize) {
+						// Get the block size from the block header
+						blockSize := r.blockIndex[blockIndex].BlockSize
+						blockOffset := r.blockIndex[blockIndex].BlockOffset
+						// Calculate the expected value section size
+						expectedValueSize := blockSize - uint32(currentPos-int64(blockOffset)) - idSectionSize
+						if expectedValueSize > valueSectionSize && expectedValueSize < 10000000 { // Sanity check
+							fmt.Printf("Adjusting value section size: reported=%d, expected=%d\n",
+								valueSectionSize, expectedValueSize)
+							valueSectionSize = expectedValueSize
+						}
 					}
 				}
 			}
