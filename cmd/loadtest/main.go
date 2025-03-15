@@ -212,6 +212,9 @@ func runImport(numValues, blockSize int, filename string, seed int64, maxValue i
 }
 
 func runAggregate(filename string, skipCache bool, parallel int, cpuProfile, memProfile string) {
+	// Track if profiling is enabled
+	isProfilingEnabled := cpuProfile != "" || memProfile != ""
+
 	// Start CPU profiling if requested
 	if cpuProfile != "" {
 		f, err := os.Create(cpuProfile)
@@ -245,7 +248,7 @@ func runAggregate(filename string, skipCache bool, parallel int, cpuProfile, mem
 	fmt.Printf("Block count: %d\n", reader.BlockCount())
 
 	// Run different aggregation operations
-	runAggregations(reader, skipCache, parallel)
+	runAggregations(reader, skipCache, parallel, isProfilingEnabled)
 
 	// Write memory profile if requested
 	if memProfile != "" {
@@ -267,7 +270,7 @@ func runAggregate(filename string, skipCache bool, parallel int, cpuProfile, mem
 	}
 }
 
-func runAggregations(reader *col.Reader, skipCache bool, parallel int) {
+func runAggregations(reader *col.Reader, skipCache bool, parallel int, isProfilingEnabled bool) {
 	// Track overall time
 	startTime := time.Now()
 
@@ -277,10 +280,29 @@ func runAggregations(reader *col.Reader, skipCache bool, parallel int) {
 		Parallel:          parallel,
 	}
 
-	// Run aggregation
+	// Number of iterations for profiling
+	iterations := 1
+	if isProfilingEnabled {
+		// Run more iterations when profiling to get meaningful data
+		iterations = 1000
+		fmt.Printf("Profiling enabled, running %d iterations\n", iterations)
+	}
+
+	// Run aggregation (multiple times if profiling)
+	var result col.AggregateResult
 	aggStart := time.Now()
-	result := reader.AggregateWithOptions(opts)
+
+	for i := 0; i < iterations; i++ {
+		result = reader.AggregateWithOptions(opts)
+	}
+
 	aggDuration := time.Since(aggStart)
+
+	// Adjust duration for reporting if we ran multiple iterations
+	reportedDuration := aggDuration
+	if iterations > 1 {
+		reportedDuration = aggDuration / time.Duration(iterations)
+	}
 
 	// Print results
 	fmt.Printf("Count: %d\n", result.Count)
@@ -288,7 +310,15 @@ func runAggregations(reader *col.Reader, skipCache bool, parallel int) {
 	fmt.Printf("Max: %d\n", result.Max)
 	fmt.Printf("Sum: %d\n", result.Sum)
 	fmt.Printf("Average: %.2f\n", result.Avg)
-	fmt.Printf("Aggregation time: %.2f ms\n", aggDuration.Seconds()*1000)
+
+	if iterations > 1 {
+		fmt.Printf("Ran %d iterations in %.2f ms (%.2f ms per iteration)\n",
+			iterations,
+			aggDuration.Seconds()*1000,
+			reportedDuration.Seconds()*1000)
+	} else {
+		fmt.Printf("Aggregation time: %.2f ms\n", reportedDuration.Seconds()*1000)
+	}
 
 	// Print parallel info if used
 	if parallel != 0 {
@@ -299,7 +329,7 @@ func runAggregations(reader *col.Reader, skipCache bool, parallel int) {
 		fmt.Printf("Parallel workers: %d\n", actualWorkers)
 	}
 
-	// Run full scan (read all blocks)
+	// Run full scan (read all blocks) - only once even when profiling
 	scanStart := time.Now()
 	var totalValues int64
 	for i := uint64(0); i < reader.BlockCount(); i++ {
