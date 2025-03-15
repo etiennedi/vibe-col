@@ -180,3 +180,110 @@ func TestSimpleWriterMultipleBatches(t *testing.T) {
 	// Log block info
 	t.Logf("Created %d blocks with %d total items", reader.BlockCount(), totalItems)
 }
+
+// Test with varint encoding to verify block size estimation
+func TestSimpleWriterVarIntEncoding(t *testing.T) {
+	// Create a temporary directory for the test
+	tempDir, err := os.MkdirTemp("", "col-simple-writer-varint-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	// Create a test file
+	filePath := filepath.Join(tempDir, "varint_test.col")
+
+	// Create a SimpleWriter with varint encoding
+	writer, err := NewSimpleWriter(filePath, WithEncoding(EncodingVarIntBoth))
+	require.NoError(t, err)
+
+	// Set a smaller target block size for testing
+	writer.targetBlockSize = 32 * 1024 // 32KB instead of 128KB
+
+	// Write a dataset with small values that will benefit from varint encoding
+	// Small values will use fewer bytes in varint encoding
+	const numPairs = 20000
+	ids := make([]uint64, numPairs)
+	values := make([]int64, numPairs)
+
+	// Fill with small values (1-100) that will use 1-2 bytes in varint encoding
+	// instead of 8 bytes in fixed encoding
+	for i := 0; i < numPairs; i++ {
+		ids[i] = uint64(i)         // Sequential IDs
+		values[i] = int64(i % 100) // Small values
+	}
+
+	// Write the data
+	err = writer.Write(ids, values)
+	require.NoError(t, err)
+
+	// Close the writer
+	err = writer.Close()
+	require.NoError(t, err)
+
+	// Open the file for reading
+	reader, err := NewReader(filePath)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	// Verify encoding type
+	assert.Equal(t, EncodingVarIntBoth, reader.EncodingType(), "Encoding type should be VarIntBoth")
+
+	// Verify block count
+	blockCount := reader.BlockCount()
+	assert.GreaterOrEqual(t, blockCount, uint64(2), "Expected at least 2 blocks")
+	t.Logf("Created %d blocks with varint encoding", blockCount)
+
+	// Verify each block's size and count
+	var totalItems uint32
+	var totalSize uint64
+	for i := uint64(0); i < blockCount; i++ {
+		// Get the block stats
+		blockStats := reader.blockIndex[i]
+
+		// Add to totals
+		totalItems += blockStats.Count
+		totalSize += uint64(blockStats.BlockSize)
+
+		// Log block info
+		t.Logf("Block %d: count=%d, size=%d", i, blockStats.Count, blockStats.BlockSize)
+
+		// Verify block alignment (except first block)
+		if i > 0 {
+			assert.Equal(t, uint64(0), blockStats.BlockOffset%uint64(PageSize),
+				"Block %d offset should be page-aligned", i)
+		}
+	}
+
+	// Verify we have all our items
+	assert.Equal(t, uint32(numPairs), totalItems, "Total items should match input count")
+	assert.Equal(t, uint64(numPairs), writer.TotalItems(), "Writer's total items should match input count")
+
+	// With varint encoding, the total size should be significantly smaller than with fixed encoding
+	// Fixed encoding would be approximately:
+	// numPairs * 16 bytes (8 for ID, 8 for value) + overhead
+	fixedEncodingEstimate := numPairs*16 + int(blockCount)*(blockHeaderSize+blockLayoutSize)
+	t.Logf("Total size with varint: %d bytes, fixed encoding estimate: %d bytes", totalSize, fixedEncodingEstimate)
+	assert.Less(t, totalSize, uint64(fixedEncodingEstimate),
+		"Varint encoding should result in smaller file size than fixed encoding")
+
+	// Read all the data back and verify it matches what we wrote
+	var allIDs []uint64
+	var allValues []int64
+
+	for i := uint64(0); i < blockCount; i++ {
+		blockIDs, blockValues, err := reader.GetPairs(i)
+		require.NoError(t, err)
+
+		allIDs = append(allIDs, blockIDs...)
+		allValues = append(allValues, blockValues...)
+	}
+
+	// Verify we got all the data back
+	assert.Equal(t, numPairs, len(allIDs), "Should have read all IDs")
+	assert.Equal(t, numPairs, len(allValues), "Should have read all values")
+
+	// Verify the data matches what we wrote
+	for i := 0; i < numPairs; i++ {
+		assert.Equal(t, uint64(i), allIDs[i], "ID at index %d should match", i)
+		assert.Equal(t, int64(i%100), allValues[i], "Value at index %d should match", i)
+	}
+}

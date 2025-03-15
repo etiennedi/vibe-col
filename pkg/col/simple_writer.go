@@ -106,9 +106,31 @@ func (sw *SimpleWriter) estimateBlockSize(itemCount int) int {
 	// Block header (64 bytes) + block layout (16 bytes)
 	baseSize := blockHeaderSize + blockLayoutSize
 
-	// Each item is 8 bytes for ID and 8 bytes for value in raw encoding
-	// This could be adjusted based on the encoding type
-	dataSize := itemCount * 16
+	// Calculate data size based on encoding type
+	dataSize := 0
+
+	// Check if we're using varint encoding
+	useVarIntForIDs := sw.writer.encodingType == EncodingVarInt ||
+		sw.writer.encodingType == EncodingVarIntID ||
+		sw.writer.encodingType == EncodingVarIntBoth
+	useVarIntForValues := sw.writer.encodingType == EncodingVarInt ||
+		sw.writer.encodingType == EncodingVarIntValue ||
+		sw.writer.encodingType == EncodingVarIntBoth
+
+	if useVarIntForIDs && useVarIntForValues {
+		// For varint encoding of both IDs and values, we estimate an average of 3 bytes per value
+		// This is a rough estimate - actual size depends on the magnitude of values
+		dataSize = itemCount * 6 // 3 bytes per ID + 3 bytes per value (average)
+	} else if useVarIntForIDs {
+		// Varint for IDs only, fixed-size for values
+		dataSize = itemCount * (3 + 8) // 3 bytes per ID + 8 bytes per value
+	} else if useVarIntForValues {
+		// Fixed-size for IDs, varint for values
+		dataSize = itemCount * (8 + 3) // 8 bytes per ID + 3 bytes per value
+	} else {
+		// Fixed-size encoding for both IDs and values
+		dataSize = itemCount * 16 // 8 bytes per ID + 8 bytes per value
+	}
 
 	return baseSize + dataSize
 }
@@ -133,7 +155,24 @@ func (sw *SimpleWriter) flushIfNeeded(force bool) error {
 			// Calculate how many items would fit in the target block size
 			// Account for the fixed overhead of the block
 			dataSpace := sw.targetBlockSize - (blockHeaderSize + blockLayoutSize)
-			itemsToWrite = dataSpace / 16 // 16 bytes per item (ID + value)
+
+			// Calculate items to write based on encoding type
+			useVarIntForIDs := sw.writer.encodingType == EncodingVarInt ||
+				sw.writer.encodingType == EncodingVarIntID ||
+				sw.writer.encodingType == EncodingVarIntBoth
+			useVarIntForValues := sw.writer.encodingType == EncodingVarInt ||
+				sw.writer.encodingType == EncodingVarIntValue ||
+				sw.writer.encodingType == EncodingVarIntBoth
+
+			bytesPerItem := 16 // Default for fixed-size encoding
+
+			if useVarIntForIDs && useVarIntForValues {
+				bytesPerItem = 6 // Estimated for varint encoding of both
+			} else if useVarIntForIDs || useVarIntForValues {
+				bytesPerItem = 11 // Estimated for varint encoding of one field
+			}
+
+			itemsToWrite = dataSpace / bytesPerItem
 
 			// Ensure we write at least one item
 			if itemsToWrite <= 0 {
