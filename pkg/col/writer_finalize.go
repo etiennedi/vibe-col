@@ -93,7 +93,25 @@ func (w *Writer) Finalize() error {
 		return fmt.Errorf("failed to seek to end: %w", err)
 	}
 
-	// Get current position - start of footer
+	// Get current position - before padding
+	currentPos, err := w.file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return fmt.Errorf("failed to get current position: %w", err)
+	}
+
+	// Add padding to align to page boundary if necessary
+	padding := calculatePadding(currentPos, PageSize)
+	if padding > 0 {
+		// Create padding buffer filled with zeros
+		paddingBuf := make([]byte, padding)
+
+		// Write padding bytes
+		if _, err := w.file.Write(paddingBuf); err != nil {
+			return fmt.Errorf("failed to write footer padding bytes: %w", err)
+		}
+	}
+
+	// Get current position - start of footer (now page-aligned)
 	footerStart, err := w.file.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return fmt.Errorf("failed to get file position: %w", err)

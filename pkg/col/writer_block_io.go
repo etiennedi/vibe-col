@@ -221,12 +221,29 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	// Calculate actual block size
 	blockSize := uint64(blockEnd - blockStart)
 
-	// Verify block size calculation
+	// Add padding if needed to align to page boundary
+	padding := calculatePadding(blockEnd, PageSize)
+	if padding > 0 {
+		// Create padding buffer filled with zeros
+		paddingBuf := make([]byte, padding)
+
+		// Write padding bytes
+		_, err := w.file.Write(paddingBuf)
+		if err != nil {
+			return fmt.Errorf("failed to write padding bytes: %w", err)
+		}
+
+		// Update block end position and size after padding
+		blockEnd += padding
+		blockSize += uint64(padding)
+	}
+
+	// Verify block size calculation (only for the actual data, excluding padding)
 	expectedBlockSize := blockHeaderSize + blockLayoutSize + uint64(idSectionSize) + uint64(valueSectionSize)
-	blockSizeDifference := blockSize - expectedBlockSize
+	blockSizeDifference := (blockSize - uint64(padding)) - expectedBlockSize
 	if blockSizeDifference != 0 {
 		return fmt.Errorf("block size mismatch: expected=%d, actual=%d, diff=%d",
-			expectedBlockSize, blockSize, blockSizeDifference)
+			expectedBlockSize, blockSize-uint64(padding), blockSizeDifference)
 	}
 
 	w.blockSizes = append(w.blockSizes, uint32(blockSize))
