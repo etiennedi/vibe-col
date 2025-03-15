@@ -149,6 +149,7 @@ func TestFilteredAggregation(t *testing.T) {
 			opts := AggregateOptions{
 				SkipPreCalculated: true, // Force reading all blocks to test filtering
 				Filter:            filter,
+				DenyFilter:        nil,
 			}
 
 			result := reader.AggregateWithOptions(opts)
@@ -186,6 +187,7 @@ func TestFilteredAggregation(t *testing.T) {
 		opts := AggregateOptions{
 			SkipPreCalculated: false, // Use cached values
 			Filter:            filter,
+			DenyFilter:        nil,
 		}
 
 		result := reader.AggregateWithOptions(opts)
@@ -212,7 +214,7 @@ func TestFilteredAggregation(t *testing.T) {
 		// Filter that only matches block 1
 		filter1 := sroar.NewBitmap()
 		filter1.Set(50)
-		blocks1 := reader.FilteredBlockIterator(filter1)
+		blocks1 := reader.FilteredBlockIterator(filter1, nil)
 		if len(blocks1) != 1 || blocks1[0] != 0 {
 			t.Errorf("Expected [0], got %v", blocks1)
 		}
@@ -221,7 +223,7 @@ func TestFilteredAggregation(t *testing.T) {
 		filter2 := sroar.NewBitmap()
 		filter2.Set(150)
 		filter2.Set(250)
-		blocks2 := reader.FilteredBlockIterator(filter2)
+		blocks2 := reader.FilteredBlockIterator(filter2, nil)
 		if len(blocks2) != 2 || blocks2[0] != 1 || blocks2[1] != 2 {
 			t.Errorf("Expected [1, 2], got %v", blocks2)
 		}
@@ -229,7 +231,7 @@ func TestFilteredAggregation(t *testing.T) {
 		// Filter that doesn't match any block
 		filter3 := sroar.NewBitmap()
 		filter3.Set(1000)
-		blocks3 := reader.FilteredBlockIterator(filter3)
+		blocks3 := reader.FilteredBlockIterator(filter3, nil)
 		if len(blocks3) != 0 {
 			t.Errorf("Expected [], got %v", blocks3)
 		}
@@ -243,7 +245,7 @@ func TestFilteredAggregation(t *testing.T) {
 		filter.Set(20)
 		filter.Set(30)
 
-		ids, values, err := reader.readBlockFiltered(0, filter)
+		ids, values, err := reader.readBlockFiltered(0, filter, nil)
 		if err != nil {
 			t.Fatalf("readBlockFiltered failed: %v", err)
 		}

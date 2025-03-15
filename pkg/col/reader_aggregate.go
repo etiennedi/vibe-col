@@ -12,6 +12,10 @@ type AggregateOptions struct {
 
 	// Filter is a bitmap of allowed IDs for filtered aggregation
 	Filter *sroar.Bitmap
+
+	// DenyFilter is a bitmap of denied IDs for filtered aggregation
+	// If both Filter and DenyFilter are provided, an ID must be in Filter AND NOT in DenyFilter
+	DenyFilter *sroar.Bitmap
 }
 
 // DefaultAggregateOptions returns the default options for aggregation
@@ -19,6 +23,7 @@ func DefaultAggregateOptions() AggregateOptions {
 	return AggregateOptions{
 		SkipPreCalculated: false,
 		Filter:            nil,
+		DenyFilter:        nil,
 	}
 }
 
@@ -29,8 +34,8 @@ func (r *Reader) Aggregate() AggregateResult {
 
 // AggregateWithOptions aggregates all blocks with the specified options and returns the result
 func (r *Reader) AggregateWithOptions(opts AggregateOptions) AggregateResult {
-	// If a filter is provided, use filtered aggregation
-	if opts.Filter != nil {
+	// If a filter or deny filter is provided, use filtered aggregation
+	if opts.Filter != nil || opts.DenyFilter != nil {
 		return r.aggregateWithFilter(opts)
 	}
 
@@ -114,9 +119,9 @@ func (r *Reader) AggregateWithOptions(opts AggregateOptions) AggregateResult {
 }
 
 // FilteredBlockIterator returns blocks that potentially contain IDs in the filter
-func (r *Reader) FilteredBlockIterator(filter *sroar.Bitmap) []uint64 {
-	if filter == nil {
-		// Return all block indices if no filter
+func (r *Reader) FilteredBlockIterator(filter, denyFilter *sroar.Bitmap) []uint64 {
+	// If no filters are provided, return all blocks
+	if filter == nil && denyFilter == nil {
 		blocks := make([]uint64, r.BlockCount())
 		for i := range blocks {
 			blocks[i] = uint64(i)
@@ -124,33 +129,48 @@ func (r *Reader) FilteredBlockIterator(filter *sroar.Bitmap) []uint64 {
 		return blocks
 	}
 
-	// Get filter range
-	filterMin := filter.Minimum()
-	filterMax := filter.Maximum()
-
-	// Find blocks that overlap with the filter range
 	var matchingBlocks []uint64
-	for i, entry := range r.blockIndex {
-		// Skip blocks outside the filter range
-		if entry.MaxID < filterMin || entry.MinID > filterMax {
-			continue
-		}
 
-		matchingBlocks = append(matchingBlocks, uint64(i))
+	// If only deny filter is provided, we need to check all blocks
+	if filter == nil && denyFilter != nil {
+		// We still need to check all blocks since we're only excluding IDs
+		blocks := make([]uint64, r.BlockCount())
+		for i := range blocks {
+			blocks[i] = uint64(i)
+		}
+		return blocks
+	}
+
+	// If allow filter is provided, use it to find matching blocks
+	if filter != nil {
+		// Get filter range
+		filterMin := filter.Minimum()
+		filterMax := filter.Maximum()
+
+		// Find blocks that overlap with the filter range
+		for i, entry := range r.blockIndex {
+			// Skip blocks outside the filter range
+			if entry.MaxID < filterMin || entry.MinID > filterMax {
+				continue
+			}
+
+			matchingBlocks = append(matchingBlocks, uint64(i))
+		}
 	}
 
 	return matchingBlocks
 }
 
-// readBlockFiltered reads a block and filters values based on the bitmap
-func (r *Reader) readBlockFiltered(blockIndex int, filter *sroar.Bitmap) ([]uint64, []int64, error) {
+// readBlockFiltered reads a block and filters values based on the allow and deny bitmaps
+func (r *Reader) readBlockFiltered(blockIndex int, filter, denyFilter *sroar.Bitmap) ([]uint64, []int64, error) {
 	// Read the entire block
 	allIDs, allValues, err := r.readBlock(blockIndex)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if filter == nil {
+	// If no filters are provided, return all values
+	if filter == nil && denyFilter == nil {
 		return allIDs, allValues, nil
 	}
 
@@ -159,7 +179,14 @@ func (r *Reader) readBlockFiltered(blockIndex int, filter *sroar.Bitmap) ([]uint
 	filteredValues := make([]int64, 0, len(allValues))
 
 	for i, id := range allIDs {
-		if filter.Contains(id) {
+		// Check if ID is allowed (either no allow filter or ID is in allow filter)
+		isAllowed := filter == nil || filter.Contains(id)
+
+		// Check if ID is denied (ID is in deny filter)
+		isDenied := denyFilter != nil && denyFilter.Contains(id)
+
+		// Include ID if it's allowed and not denied
+		if isAllowed && !isDenied {
 			filteredIDs = append(filteredIDs, id)
 			filteredValues = append(filteredValues, allValues[i])
 		}
@@ -171,7 +198,7 @@ func (r *Reader) readBlockFiltered(blockIndex int, filter *sroar.Bitmap) ([]uint
 // aggregateWithFilter performs aggregation with filtering
 func (r *Reader) aggregateWithFilter(opts AggregateOptions) AggregateResult {
 	// Get blocks that potentially match the filter
-	matchingBlocks := r.FilteredBlockIterator(opts.Filter)
+	matchingBlocks := r.FilteredBlockIterator(opts.Filter, opts.DenyFilter)
 
 	// If no blocks match, return empty result
 	if len(matchingBlocks) == 0 {
@@ -192,7 +219,7 @@ func (r *Reader) aggregateWithFilter(opts AggregateOptions) AggregateResult {
 
 	for _, blockIdx := range matchingBlocks {
 		// Read block with filtering
-		_, values, err := r.readBlockFiltered(int(blockIdx), opts.Filter)
+		_, values, err := r.readBlockFiltered(int(blockIdx), opts.Filter, opts.DenyFilter)
 		if err != nil {
 			// Skip blocks with errors
 			continue
