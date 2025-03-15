@@ -280,44 +280,75 @@ func runAggregations(reader *col.Reader, skipCache bool, parallel int, isProfili
 		Parallel:          parallel,
 	}
 
-	// Number of iterations for profiling
+	// Run a single iteration first to get a baseline
+	aggStart := time.Now()
+	result := reader.AggregateWithOptions(opts)
+	singleIterationDuration := time.Since(aggStart)
+
+	// Determine if we need to run more iterations for profiling
 	iterations := 1
 	if isProfilingEnabled {
-		// Run more iterations when profiling to get meaningful data
-		iterations = 1000
-		fmt.Printf("Profiling enabled, running %d iterations\n", iterations)
-	}
+		// Target duration for profiling (1 second)
+		targetDuration := time.Second
 
-	// Run aggregation (multiple times if profiling)
-	var result col.AggregateResult
-	aggStart := time.Now()
+		if singleIterationDuration < targetDuration {
+			// Run more iterations when profiling to get meaningful data
+			// Calculate how many iterations we need to run to reach the target duration
+			estimatedIterations := int(targetDuration / singleIterationDuration)
 
-	for i := 0; i < iterations; i++ {
-		result = reader.AggregateWithOptions(opts)
-	}
+			// Ensure we run at least 10 iterations for stability
+			if estimatedIterations < 10 {
+				estimatedIterations = 10
+			}
 
-	aggDuration := time.Since(aggStart)
+			fmt.Printf("Profiling enabled, running ~%d iterations to reach 1 second of profiling data\n", estimatedIterations)
 
-	// Adjust duration for reporting if we ran multiple iterations
-	reportedDuration := aggDuration
-	if iterations > 1 {
-		reportedDuration = aggDuration / time.Duration(iterations)
-	}
+			// Run the remaining iterations
+			remainingIterations := estimatedIterations - 1 // We already ran one
+			iterationStart := time.Now()
 
-	// Print results
-	fmt.Printf("Count: %d\n", result.Count)
-	fmt.Printf("Min: %d\n", result.Min)
-	fmt.Printf("Max: %d\n", result.Max)
-	fmt.Printf("Sum: %d\n", result.Sum)
-	fmt.Printf("Average: %.2f\n", result.Avg)
+			for i := 0; i < remainingIterations; i++ {
+				result = reader.AggregateWithOptions(opts)
+			}
 
-	if iterations > 1 {
-		fmt.Printf("Ran %d iterations in %.2f ms (%.2f ms per iteration)\n",
-			iterations,
-			aggDuration.Seconds()*1000,
-			reportedDuration.Seconds()*1000)
+			// Update total iterations and duration
+			iterations = estimatedIterations
+			aggDuration := singleIterationDuration + time.Since(iterationStart)
+
+			// Adjust duration for reporting
+			reportedDuration := aggDuration / time.Duration(iterations)
+
+			// Print results
+			fmt.Printf("Count: %d\n", result.Count)
+			fmt.Printf("Min: %d\n", result.Min)
+			fmt.Printf("Max: %d\n", result.Max)
+			fmt.Printf("Sum: %d\n", result.Sum)
+			fmt.Printf("Average: %.2f\n", result.Avg)
+			fmt.Printf("Ran %d iterations in %.2f ms (%.2f ms per iteration)\n",
+				iterations,
+				aggDuration.Seconds()*1000,
+				reportedDuration.Seconds()*1000)
+		} else {
+			// Single iteration already took more than the target duration
+			fmt.Printf("Single iteration took %.2f ms, no need for additional iterations\n",
+				singleIterationDuration.Seconds()*1000)
+
+			// Print results
+			fmt.Printf("Count: %d\n", result.Count)
+			fmt.Printf("Min: %d\n", result.Min)
+			fmt.Printf("Max: %d\n", result.Max)
+			fmt.Printf("Sum: %d\n", result.Sum)
+			fmt.Printf("Average: %.2f\n", result.Avg)
+			fmt.Printf("Aggregation time: %.2f ms\n", singleIterationDuration.Seconds()*1000)
+		}
 	} else {
-		fmt.Printf("Aggregation time: %.2f ms\n", reportedDuration.Seconds()*1000)
+		// Not profiling, just print the results from the single iteration
+		fmt.Printf("Count: %d\n", result.Count)
+		fmt.Printf("Min: %d\n", result.Min)
+		fmt.Printf("Max: %d\n", result.Max)
+		fmt.Printf("Sum: %d\n", result.Sum)
+		fmt.Printf("Average: %.2f\n", result.Avg)
+		fmt.Printf("Aggregation time: %.2f ms\n", singleIterationDuration.Seconds()*1000)
 	}
 
 	// Print parallel info if used
