@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"vibe-lsm/pkg/col"
@@ -33,6 +34,7 @@ func main() {
 	// Aggregate command flags
 	aggregateFilename := aggregateCmd.String("file", defaultFilename, "Input file name")
 	aggregateSkipCache := aggregateCmd.Bool("skip-cache", true, "Skip using cached sums")
+	aggregateParallel := aggregateCmd.Int("parallel", 0, "Parallel factor (0=sequential, <0=auto/GOMAXPROCS, >0=specific number of workers)")
 
 	// Check if a command is provided
 	if len(os.Args) < 2 {
@@ -47,7 +49,7 @@ func main() {
 		runImport(*importNumValues, *importBlockSize, *importFilename, *importSeed, *importMaxValue, *importMaxID)
 	case "aggregate":
 		aggregateCmd.Parse(os.Args[2:])
-		runAggregate(*aggregateFilename, *aggregateSkipCache)
+		runAggregate(*aggregateFilename, *aggregateSkipCache, *aggregateParallel)
 	default:
 		fmt.Printf("Unknown command: %s\n", os.Args[1])
 		fmt.Println("Expected 'import' or 'aggregate' subcommand")
@@ -70,8 +72,8 @@ func runImport(numValues, blockSize int, filename string, seed int64, maxValue i
 	// Initialize random number generator
 	rng := rand.New(rand.NewSource(seed))
 
-	// Create writer with VarInt encoding for both IDs and values
-	writer, err := col.NewWriter(filename,
+	// Create SimpleWriter with VarInt encoding for both IDs and values
+	writer, err := col.NewSimpleWriter(filename,
 		col.WithBlockSize(uint32(blockSize)),
 		col.WithEncoding(col.EncodingVarIntBoth))
 	if err != nil {
@@ -86,13 +88,9 @@ func runImport(numValues, blockSize int, filename string, seed int64, maxValue i
 	valuesWritten := 0
 	blockCount := 0
 
-	// Prepare batch size based on block size
-	batchSize := blockSize
-	if batchSize > 100000 {
-		batchSize = 100000 // Cap batch size to avoid excessive memory usage
-	}
-
 	// Generate and write values in batches
+	batchSize := 10000 // Use a reasonable batch size for SimpleWriter
+
 	for valuesWritten < numValues {
 		// Determine batch size for this iteration
 		currentBatchSize := batchSize
@@ -124,30 +122,35 @@ func runImport(numValues, blockSize int, filename string, seed int64, maxValue i
 			}
 		}
 
-		// Write the batch
-		if err := writer.WriteBlock(ids, values); err != nil {
-			fmt.Printf("Error writing block: %v\n", err)
+		// Write the batch to the SimpleWriter
+		if err := writer.Write(ids, values); err != nil {
+			fmt.Printf("Error writing batch: %v\n", err)
 			os.Exit(1)
 		}
 
 		// Update counters
 		valuesWritten += currentBatchSize
-		blockCount++
+
+		// Get current total items to track progress
+		currentTotalItems := writer.TotalItems()
+		if currentTotalItems > uint64(blockCount) {
+			blockCount = int(currentTotalItems)
+		}
 
 		// Report progress every second
 		now := time.Now()
 		if now.Sub(lastReportTime) >= time.Second {
 			elapsed := now.Sub(startTime).Seconds()
-			fmt.Printf("Progress: %d/%d values (%.2f%%), %d blocks, %.2f values/sec\n",
+			fmt.Printf("Progress: %d/%d values (%.2f%%), %d items written, %.2f values/sec\n",
 				valuesWritten, numValues, float64(valuesWritten)/float64(numValues)*100,
-				blockCount, float64(valuesWritten)/elapsed)
+				currentTotalItems, float64(valuesWritten)/elapsed)
 			lastReportTime = now
 		}
 	}
 
-	// Finalize the file
-	if err := writer.FinalizeAndClose(); err != nil {
-		fmt.Printf("Error finalizing file: %v\n", err)
+	// Close the file (this will finalize it)
+	if err := writer.Close(); err != nil {
+		fmt.Printf("Error closing file: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -155,8 +158,7 @@ func runImport(numValues, blockSize int, filename string, seed int64, maxValue i
 	elapsed := time.Since(startTime).Seconds()
 	fmt.Printf("\nImport completed in %.2f seconds\n", elapsed)
 	fmt.Printf("Total values: %d\n", valuesWritten)
-	fmt.Printf("Total blocks: %d\n", blockCount)
-	fmt.Printf("Average values per block: %.2f\n", float64(valuesWritten)/float64(blockCount))
+	fmt.Printf("Total items written: %d\n", writer.TotalItems())
 	fmt.Printf("Average throughput: %.2f values/sec\n", float64(valuesWritten)/elapsed)
 
 	// Get file size
@@ -168,8 +170,8 @@ func runImport(numValues, blockSize int, filename string, seed int64, maxValue i
 	}
 }
 
-func runAggregate(filename string, skipCache bool) {
-	fmt.Printf("Running aggregations on %s (skip cache: %v)\n", filename, skipCache)
+func runAggregate(filename string, skipCache bool, parallel int) {
+	fmt.Printf("Running aggregations on %s (skip cache: %v, parallel: %v)\n", filename, skipCache, parallel)
 
 	// Open the file
 	reader, err := col.NewReader(filename)
@@ -185,16 +187,17 @@ func runAggregate(filename string, skipCache bool) {
 	fmt.Printf("Block count: %d\n", reader.BlockCount())
 
 	// Run different aggregation operations
-	runAggregations(reader, skipCache)
+	runAggregations(reader, skipCache, parallel)
 }
 
-func runAggregations(reader *col.Reader, skipCache bool) {
+func runAggregations(reader *col.Reader, skipCache bool, parallel int) {
 	// Track overall time
 	startTime := time.Now()
 
 	// Create aggregate options
 	opts := col.AggregateOptions{
 		SkipPreCalculated: skipCache,
+		Parallel:          parallel,
 	}
 
 	// Run aggregation
@@ -209,6 +212,15 @@ func runAggregations(reader *col.Reader, skipCache bool) {
 	fmt.Printf("Sum: %d\n", result.Sum)
 	fmt.Printf("Average: %.2f\n", result.Avg)
 	fmt.Printf("Aggregation time: %.2f ms\n", aggDuration.Seconds()*1000)
+
+	// Print parallel info if used
+	if parallel != 0 {
+		actualWorkers := parallel
+		if parallel < 0 {
+			actualWorkers = runtime.GOMAXPROCS(0)
+		}
+		fmt.Printf("Parallel workers: %d\n", actualWorkers)
+	}
 
 	// Run full scan (read all blocks)
 	scanStart := time.Now()
