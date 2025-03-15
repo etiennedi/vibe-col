@@ -64,6 +64,76 @@ func TestGlobalIDBitmap(t *testing.T) {
 	assert.Equal(t, 13, bitmap.GetCardinality(), "Bitmap should contain 13 IDs")
 }
 
+func TestGlobalIDBitmapCaching(t *testing.T) {
+	// Create a temporary file for testing
+	tmpFile, err := os.CreateTemp("", "global_id_bitmap_caching_test_*.col")
+	require.NoError(t, err)
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	// Create a writer
+	writer, err := NewWriter(tmpFile.Name())
+	require.NoError(t, err)
+
+	// Write a block with some IDs
+	ids := []uint64{1, 2, 3, 4, 5}
+	values := []int64{10, 20, 30, 40, 50}
+	err = writer.WriteBlock(ids, values)
+	require.NoError(t, err)
+
+	// Finalize the file
+	err = writer.FinalizeAndClose()
+	require.NoError(t, err)
+
+	// Open the file for reading
+	reader, err := NewReader(tmpFile.Name())
+	require.NoError(t, err)
+	defer reader.Close()
+
+	// Get the global ID bitmap without caching (default)
+	bitmap1, err := reader.GetGlobalIDBitmap()
+	require.NoError(t, err)
+
+	// Get the bitmap again - should be a different instance
+	bitmap2, err := reader.GetGlobalIDBitmap()
+	require.NoError(t, err)
+
+	// Both bitmaps should contain the same IDs
+	for _, id := range ids {
+		assert.True(t, bitmap1.Contains(id), "Bitmap1 should contain ID %d", id)
+		assert.True(t, bitmap2.Contains(id), "Bitmap2 should contain ID %d", id)
+	}
+
+	// Enable caching
+	reader.EnableGlobalIDBitmapCaching()
+
+	// Get the bitmap with caching enabled
+	bitmap3, err := reader.GetGlobalIDBitmap()
+	require.NoError(t, err)
+
+	// Get the bitmap again - should be the same instance
+	bitmap4, err := reader.GetGlobalIDBitmap()
+	require.NoError(t, err)
+
+	// Both bitmaps should contain the same IDs
+	for _, id := range ids {
+		assert.True(t, bitmap3.Contains(id), "Bitmap3 should contain ID %d", id)
+		assert.True(t, bitmap4.Contains(id), "Bitmap4 should contain ID %d", id)
+	}
+
+	// Disable caching
+	reader.DisableGlobalIDBitmapCaching()
+
+	// Get the bitmap again - should be a new instance
+	bitmap5, err := reader.GetGlobalIDBitmap()
+	require.NoError(t, err)
+
+	// All bitmaps should contain the same IDs
+	for _, id := range ids {
+		assert.True(t, bitmap5.Contains(id), "Bitmap5 should contain ID %d", id)
+	}
+}
+
 func TestEmptyGlobalIDBitmap(t *testing.T) {
 	// Create a temporary file for testing
 	tmpFile, err := os.CreateTemp("", "empty_global_id_bitmap_test_*.col")

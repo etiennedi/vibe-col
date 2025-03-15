@@ -10,12 +10,13 @@ import (
 
 // Reader reads a column file
 type Reader struct {
-	file       *os.File
-	fileSize   int64
-	header     FileHeader
-	footerMeta FooterMetadata
-	blockIndex []FooterEntry
-	globalIDs  *sroar.Bitmap
+	file           *os.File
+	fileSize       int64
+	header         FileHeader
+	footerMeta     FooterMetadata
+	blockIndex     []FooterEntry
+	globalIDs      *sroar.Bitmap
+	cacheGlobalIDs bool // Whether to cache the global ID bitmap
 }
 
 // NewReader creates a new column file reader
@@ -34,8 +35,9 @@ func NewReader(filename string) (*Reader, error) {
 	fileSize := fileInfo.Size()
 
 	reader := &Reader{
-		file:     file,
-		fileSize: fileSize,
+		file:           file,
+		fileSize:       fileSize,
+		cacheGlobalIDs: false, // Caching is off by default
 	}
 
 	// Read the file header
@@ -122,18 +124,34 @@ func (r *Reader) DebugInfo() string {
 	return info
 }
 
+// EnableGlobalIDBitmapCaching enables caching of the global ID bitmap
+func (r *Reader) EnableGlobalIDBitmapCaching() {
+	r.cacheGlobalIDs = true
+}
+
+// DisableGlobalIDBitmapCaching disables caching of the global ID bitmap
+func (r *Reader) DisableGlobalIDBitmapCaching() {
+	r.cacheGlobalIDs = false
+	r.globalIDs = nil // Clear any cached bitmap
+}
+
 // GetGlobalIDBitmap returns the global ID bitmap from the file
 // If the file doesn't have a global ID bitmap, it returns an empty bitmap
+// The bitmap is cached only if caching is enabled
 func (r *Reader) GetGlobalIDBitmap() (*sroar.Bitmap, error) {
-	// If we've already loaded the bitmap, return it
-	if r.globalIDs != nil {
+	// If we've already loaded the bitmap and caching is enabled, return it
+	if r.globalIDs != nil && r.cacheGlobalIDs {
 		return r.globalIDs, nil
 	}
 
 	// If the file doesn't have a bitmap, return an empty one
 	if r.header.BitmapOffset == 0 || r.header.BitmapSize == 0 {
-		r.globalIDs = sroar.NewBitmap()
-		return r.globalIDs, nil
+		bitmap := sroar.NewBitmap()
+		// Only cache if enabled
+		if r.cacheGlobalIDs {
+			r.globalIDs = bitmap
+		}
+		return bitmap, nil
 	}
 
 	// Read the bitmap size (first 4 bytes)
@@ -150,7 +168,12 @@ func (r *Reader) GetGlobalIDBitmap() (*sroar.Bitmap, error) {
 	}
 
 	// Create a bitmap from the buffer
-	r.globalIDs = sroar.FromBuffer(bitmapBuf)
+	bitmap := sroar.FromBuffer(bitmapBuf)
 
-	return r.globalIDs, nil
+	// Only cache if enabled
+	if r.cacheGlobalIDs {
+		r.globalIDs = bitmap
+	}
+
+	return bitmap, nil
 }
