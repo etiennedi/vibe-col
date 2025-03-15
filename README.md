@@ -1,3 +1,16 @@
+# Is it possible to vibe-code a production-grade database? 
+
+This project is an experiment to find out. So far it's looking good. At the 48
+commit mark there were only two commits, I had to create manually. The rest is
+entirely AI-generated. 
+
+Follow me on [Twitter / X](https://x.com/etiennedi) to see how this project
+develops and benefit from all my learnings.
+
+Everything below this line is AI-generated.
+
+---
+
 # Vibe-Col
 
 Vibe-Col is a high-performance column-oriented storage engine designed for efficient data storage and retrieval.
