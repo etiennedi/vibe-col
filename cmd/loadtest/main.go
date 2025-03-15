@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"time"
 
 	"vibe-lsm/pkg/col"
@@ -30,11 +31,15 @@ func main() {
 	importSeed := importCmd.Int64("seed", time.Now().UnixNano(), "Random seed")
 	importMaxValue := importCmd.Int64("max-value", 1000000, "Maximum value")
 	importMaxID := importCmd.Uint64("max-id", 20000000, "Maximum ID")
+	importCPUProfile := importCmd.String("cpuprofile", "", "Write CPU profile to file")
+	importMemProfile := importCmd.String("memprofile", "", "Write memory profile to file")
 
 	// Aggregate command flags
 	aggregateFilename := aggregateCmd.String("file", defaultFilename, "Input file name")
 	aggregateSkipCache := aggregateCmd.Bool("skip-cache", true, "Skip using cached sums")
 	aggregateParallel := aggregateCmd.Int("parallel", 0, "Parallel factor (0=sequential, <0=auto/GOMAXPROCS, >0=specific number of workers)")
+	aggregateCPUProfile := aggregateCmd.String("cpuprofile", "", "Write CPU profile to file")
+	aggregateMemProfile := aggregateCmd.String("memprofile", "", "Write memory profile to file")
 
 	// Check if a command is provided
 	if len(os.Args) < 2 {
@@ -46,10 +51,10 @@ func main() {
 	switch os.Args[1] {
 	case "import":
 		importCmd.Parse(os.Args[2:])
-		runImport(*importNumValues, *importBlockSize, *importFilename, *importSeed, *importMaxValue, *importMaxID)
+		runImport(*importNumValues, *importBlockSize, *importFilename, *importSeed, *importMaxValue, *importMaxID, *importCPUProfile, *importMemProfile)
 	case "aggregate":
 		aggregateCmd.Parse(os.Args[2:])
-		runAggregate(*aggregateFilename, *aggregateSkipCache, *aggregateParallel)
+		runAggregate(*aggregateFilename, *aggregateSkipCache, *aggregateParallel, *aggregateCPUProfile, *aggregateMemProfile)
 	default:
 		fmt.Printf("Unknown command: %s\n", os.Args[1])
 		fmt.Println("Expected 'import' or 'aggregate' subcommand")
@@ -57,7 +62,24 @@ func main() {
 	}
 }
 
-func runImport(numValues, blockSize int, filename string, seed int64, maxValue int64, maxID uint64) {
+func runImport(numValues, blockSize int, filename string, seed int64, maxValue int64, maxID uint64, cpuProfile, memProfile string) {
+	// Start CPU profiling if requested
+	if cpuProfile != "" {
+		f, err := os.Create(cpuProfile)
+		if err != nil {
+			fmt.Printf("Error creating CPU profile file: %v\n", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+
+		if err := pprof.StartCPUProfile(f); err != nil {
+			fmt.Printf("Error starting CPU profile: %v\n", err)
+			os.Exit(1)
+		}
+		defer pprof.StopCPUProfile()
+		fmt.Printf("CPU profiling enabled, writing to %s\n", cpuProfile)
+	}
+
 	fmt.Printf("Importing %d values with block size %d to %s\n", numValues, blockSize, filename)
 
 	// Create directory if it doesn't exist
@@ -168,9 +190,45 @@ func runImport(numValues, blockSize int, filename string, seed int64, maxValue i
 		fmt.Printf("File size: %.2f MB\n", fileSizeMB)
 		fmt.Printf("Bytes per value: %.2f\n", float64(fileInfo.Size())/float64(valuesWritten))
 	}
+
+	// Write memory profile if requested
+	if memProfile != "" {
+		f, err := os.Create(memProfile)
+		if err != nil {
+			fmt.Printf("Error creating memory profile file: %v\n", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+
+		// Run garbage collection to get accurate memory profile
+		runtime.GC()
+
+		if err := pprof.WriteHeapProfile(f); err != nil {
+			fmt.Printf("Error writing memory profile: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Memory profile written to %s\n", memProfile)
+	}
 }
 
-func runAggregate(filename string, skipCache bool, parallel int) {
+func runAggregate(filename string, skipCache bool, parallel int, cpuProfile, memProfile string) {
+	// Start CPU profiling if requested
+	if cpuProfile != "" {
+		f, err := os.Create(cpuProfile)
+		if err != nil {
+			fmt.Printf("Error creating CPU profile file: %v\n", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+
+		if err := pprof.StartCPUProfile(f); err != nil {
+			fmt.Printf("Error starting CPU profile: %v\n", err)
+			os.Exit(1)
+		}
+		defer pprof.StopCPUProfile()
+		fmt.Printf("CPU profiling enabled, writing to %s\n", cpuProfile)
+	}
+
 	fmt.Printf("Running aggregations on %s (skip cache: %v, parallel: %v)\n", filename, skipCache, parallel)
 
 	// Open the file
@@ -188,6 +246,25 @@ func runAggregate(filename string, skipCache bool, parallel int) {
 
 	// Run different aggregation operations
 	runAggregations(reader, skipCache, parallel)
+
+	// Write memory profile if requested
+	if memProfile != "" {
+		f, err := os.Create(memProfile)
+		if err != nil {
+			fmt.Printf("Error creating memory profile file: %v\n", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+
+		// Run garbage collection to get accurate memory profile
+		runtime.GC()
+
+		if err := pprof.WriteHeapProfile(f); err != nil {
+			fmt.Printf("Error writing memory profile: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Memory profile written to %s\n", memProfile)
+	}
 }
 
 func runAggregations(reader *col.Reader, skipCache bool, parallel int) {
