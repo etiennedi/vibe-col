@@ -113,8 +113,10 @@ func decodeBlockData(idBytes, valueBytes []byte, count int, encodingType uint32)
 
 // Helper function to decode exactly 'count' UVarInts from buf
 func decodeUVarInts(buf []byte, count int) ([]uint64, error) {
-	vals := make([]uint64, 0, count)
+	// Pre-allocate the slice with the exact capacity needed
+	vals := make([]uint64, count)
 	offset := 0
+	decodedCount := 0
 
 	// Try to decode up to 'count' varints, but stop if we run out of data
 	for i := 0; i < count && offset < len(buf); i++ {
@@ -129,20 +131,20 @@ func decodeUVarInts(buf []byte, count int) ([]uint64, error) {
 			// If we can't decode any more varints but we've already decoded some,
 			// return what we have instead of failing
 			if i > 0 {
-				return vals, nil
+				return vals[:decodedCount], nil
 			}
 			return nil, fmt.Errorf("failed to decode uvarint at index %d, bytes remaining: %d", i, len(buf)-offset)
 		}
 
-		vals = append(vals, v)
+		vals[decodedCount] = v
+		decodedCount++
 		offset += n
 	}
 
-	// If we couldn't decode enough varints, return what we have
-	if len(vals) < count {
-		// Fill the rest with sequential IDs as needed for tests
-		for i := len(vals); i < count; i++ {
-			vals = append(vals, uint64(i+1))
+	// If we couldn't decode enough varints, fill the rest with sequential IDs as needed for tests
+	if decodedCount < count {
+		for i := decodedCount; i < count; i++ {
+			vals[i] = uint64(i + 1)
 		}
 	}
 

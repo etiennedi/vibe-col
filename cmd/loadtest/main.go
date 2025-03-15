@@ -40,6 +40,7 @@ func main() {
 	aggregateParallel := aggregateCmd.Int("parallel", 0, "Parallel factor (0=sequential, <0=auto/GOMAXPROCS, >0=specific number of workers)")
 	aggregateCPUProfile := aggregateCmd.String("cpuprofile", "", "Write CPU profile to file")
 	aggregateMemProfile := aggregateCmd.String("memprofile", "", "Write memory profile to file")
+	aggregateMemProfileType := aggregateCmd.String("memprofiletype", "heap", "Memory profile type: 'heap' or 'allocs'")
 
 	// Check if a command is provided
 	if len(os.Args) < 2 {
@@ -54,7 +55,7 @@ func main() {
 		runImport(*importNumValues, *importBlockSize, *importFilename, *importSeed, *importMaxValue, *importMaxID, *importCPUProfile, *importMemProfile)
 	case "aggregate":
 		aggregateCmd.Parse(os.Args[2:])
-		runAggregate(*aggregateFilename, *aggregateSkipCache, *aggregateParallel, *aggregateCPUProfile, *aggregateMemProfile)
+		runAggregate(*aggregateFilename, *aggregateSkipCache, *aggregateParallel, *aggregateCPUProfile, *aggregateMemProfile, *aggregateMemProfileType)
 	default:
 		fmt.Printf("Unknown command: %s\n", os.Args[1])
 		fmt.Println("Expected 'import' or 'aggregate' subcommand")
@@ -207,11 +208,11 @@ func runImport(numValues, blockSize int, filename string, seed int64, maxValue i
 			fmt.Printf("Error writing memory profile: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Memory profile written to %s\n", memProfile)
+		fmt.Printf("Heap profile written to %s\n", memProfile)
 	}
 }
 
-func runAggregate(filename string, skipCache bool, parallel int, cpuProfile, memProfile string) {
+func runAggregate(filename string, skipCache bool, parallel int, cpuProfile, memProfile, memProfileType string) {
 	// Track if profiling is enabled
 	isProfilingEnabled := cpuProfile != "" || memProfile != ""
 
@@ -262,11 +263,20 @@ func runAggregate(filename string, skipCache bool, parallel int, cpuProfile, mem
 		// Run garbage collection to get accurate memory profile
 		runtime.GC()
 
-		if err := pprof.WriteHeapProfile(f); err != nil {
-			fmt.Printf("Error writing memory profile: %v\n", err)
-			os.Exit(1)
+		if memProfileType == "allocs" {
+			if err := pprof.Lookup("allocs").WriteTo(f, 0); err != nil {
+				fmt.Printf("Error writing allocation profile: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Allocation profile written to %s\n", memProfile)
+		} else {
+			// Default to heap profile
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				fmt.Printf("Error writing heap profile: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Heap profile written to %s\n", memProfile)
 		}
-		fmt.Printf("Memory profile written to %s\n", memProfile)
 	}
 }
 
