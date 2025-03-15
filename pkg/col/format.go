@@ -39,6 +39,8 @@ type FileHeader struct {
 	CompressionType uint32
 	EncodingType    uint32
 	CreationTime    uint64
+	BitmapOffset    uint64 // Offset to the global ID bitmap
+	BitmapSize      uint64 // Size of the global ID bitmap in bytes
 	// Reserved space - fills up to 64 bytes
 }
 
@@ -105,6 +107,8 @@ func NewFileHeader(blockCount uint64, blockSizeTarget uint32, encodingType uint3
 		CompressionType: CompressionNone,
 		EncodingType:    encodingType,
 		CreationTime:    uint64(time.Now().Unix()),
+		BitmapOffset:    0, // Will be updated when writing the bitmap
+		BitmapSize:      0, // Will be updated when writing the bitmap
 	}
 }
 

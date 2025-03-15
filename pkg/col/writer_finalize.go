@@ -4,7 +4,51 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+
+	"github.com/weaviate/sroar"
 )
+
+// writeGlobalIDBitmap writes the global ID bitmap to the file
+func (w *Writer) writeGlobalIDBitmap() (uint64, uint64, error) {
+	// Create a new bitmap
+	bitmap := sroar.NewBitmap()
+
+	// Add all IDs to the bitmap
+	for id := range w.globalIDs {
+		bitmap.Set(id)
+	}
+
+	// Get the current position - this is where the bitmap will start
+	bitmapOffset, err := w.file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to get bitmap offset: %w", err)
+	}
+
+	// Get the buffer from the bitmap
+	// The sroar bitmap is already a serialized representation
+	buf := bitmap.ToBuffer()
+
+	// Write the size of the bitmap
+	if err := binary.Write(w.file, binary.LittleEndian, uint32(len(buf))); err != nil {
+		return 0, 0, fmt.Errorf("failed to write bitmap size: %w", err)
+	}
+
+	// Write the bitmap data
+	if _, err := w.file.Write(buf); err != nil {
+		return 0, 0, fmt.Errorf("failed to write bitmap data: %w", err)
+	}
+
+	// Get the current position - this is where the bitmap ends
+	currentPos, err := w.file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to get current position: %w", err)
+	}
+
+	// Calculate the size of the bitmap (including the size field)
+	bitmapSize := currentPos - bitmapOffset
+
+	return uint64(bitmapOffset), uint64(bitmapSize), nil
+}
 
 // FinalizeAndClose finalizes the file by writing the footer and closes the file
 func (w *Writer) FinalizeAndClose() error {
@@ -16,13 +60,21 @@ func (w *Writer) FinalizeAndClose() error {
 
 // Finalize finalizes the file by writing the footer
 func (w *Writer) Finalize() error {
-	// Update file header with final block count
+	// Write the global ID bitmap
+	bitmapOffset, bitmapSize, err := w.writeGlobalIDBitmap()
+	if err != nil {
+		return fmt.Errorf("failed to write global ID bitmap: %w", err)
+	}
+
+	// Update file header with final block count and bitmap information
 	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("failed to seek to start: %w", err)
 	}
 
 	// Create updated header
 	header := NewFileHeader(w.blockCount, w.blockSizeTarget, w.encodingType)
+	header.BitmapOffset = bitmapOffset
+	header.BitmapSize = bitmapSize
 
 	// Write header fields
 	headerFields := []interface{}{
@@ -30,6 +82,12 @@ func (w *Writer) Finalize() error {
 		header.Version,
 		header.ColumnType,
 		header.BlockCount,
+		header.BlockSizeTarget,
+		header.CompressionType,
+		header.EncodingType,
+		header.CreationTime,
+		header.BitmapOffset,
+		header.BitmapSize,
 	}
 
 	// Write the fields we need to update

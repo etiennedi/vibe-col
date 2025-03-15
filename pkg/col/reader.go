@@ -1,8 +1,11 @@
 package col
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
+
+	"github.com/weaviate/sroar"
 )
 
 // Reader reads a column file
@@ -12,6 +15,7 @@ type Reader struct {
 	header     FileHeader
 	footerMeta FooterMetadata
 	blockIndex []FooterEntry
+	globalIDs  *sroar.Bitmap
 }
 
 // NewReader creates a new column file reader
@@ -116,4 +120,37 @@ func (r *Reader) DebugInfo() string {
 	}
 
 	return info
+}
+
+// GetGlobalIDBitmap returns the global ID bitmap from the file
+// If the file doesn't have a global ID bitmap, it returns an empty bitmap
+func (r *Reader) GetGlobalIDBitmap() (*sroar.Bitmap, error) {
+	// If we've already loaded the bitmap, return it
+	if r.globalIDs != nil {
+		return r.globalIDs, nil
+	}
+
+	// If the file doesn't have a bitmap, return an empty one
+	if r.header.BitmapOffset == 0 || r.header.BitmapSize == 0 {
+		r.globalIDs = sroar.NewBitmap()
+		return r.globalIDs, nil
+	}
+
+	// Read the bitmap size (first 4 bytes)
+	sizeBuf, err := r.readBytesAt(int64(r.header.BitmapOffset), 4)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read bitmap size: %w", err)
+	}
+	bitmapSize := binary.LittleEndian.Uint32(sizeBuf)
+
+	// Read the bitmap data
+	bitmapBuf, err := r.readBytesAt(int64(r.header.BitmapOffset)+4, int(bitmapSize))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read bitmap data: %w", err)
+	}
+
+	// Create a bitmap from the buffer
+	r.globalIDs = sroar.FromBuffer(bitmapBuf)
+
+	return r.globalIDs, nil
 }

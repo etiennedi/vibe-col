@@ -46,6 +46,14 @@ func (r *Reader) readHeader() error {
 
 	// Read creation time
 	r.header.CreationTime = readBufferedUint64(headerBuf, offset)
+	offset += 8
+
+	// Read bitmap offset
+	r.header.BitmapOffset = readBufferedUint64(headerBuf, offset)
+	offset += 8
+
+	// Read bitmap size
+	r.header.BitmapSize = readBufferedUint64(headerBuf, offset)
 
 	// Validate header
 	if r.header.Magic != MagicNumber {

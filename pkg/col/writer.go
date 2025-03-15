@@ -19,9 +19,10 @@ type Writer struct {
 	blockCount      uint64
 	encodingType    uint32
 	blockSizeTarget uint32
-	blockPositions  []uint64     // Position of each block in the file
-	blockSizes      []uint32     // Size of each block in bytes
-	blockStats      []BlockStats // Statistics for each block
+	blockPositions  []uint64            // Position of each block in the file
+	blockSizes      []uint32            // Size of each block in bytes
+	blockStats      []BlockStats        // Statistics for each block
+	globalIDs       map[uint64]struct{} // Set of all IDs in the file
 }
 
 // NewWriter creates a new column file writer
@@ -39,6 +40,7 @@ func NewWriter(filename string, options ...WriterOption) (*Writer, error) {
 		blockPositions:  make([]uint64, 0),
 		blockSizes:      make([]uint32, 0),
 		blockStats:      make([]BlockStats, 0),
+		globalIDs:       make(map[uint64]struct{}),
 	}
 
 	// Apply options
