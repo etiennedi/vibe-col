@@ -27,6 +27,8 @@ func (w *Writer) writeHeader() error {
 		header.CompressionType,
 		header.EncodingType,
 		header.CreationTime,
+		header.BitmapOffset,
+		header.BitmapSize,
 	}
 
 	// Write all header fields
@@ -38,7 +40,7 @@ func (w *Writer) writeHeader() error {
 
 	// Calculate reserved space - sum of the sizes of the header fields we've written
 	headerFieldsSize := uint64Size + uint32Size + uint32Size + uint64Size +
-		uint32Size + uint32Size + uint32Size + uint64Size
+		uint32Size + uint32Size + uint32Size + uint64Size + uint64Size + uint64Size
 	reservedSize := headerSize - headerFieldsSize
 
 	// Write reserved space to fill up to 64 bytes
