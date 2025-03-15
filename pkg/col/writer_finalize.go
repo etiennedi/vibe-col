@@ -4,20 +4,10 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-
-	"github.com/weaviate/sroar"
 )
 
 // writeGlobalIDBitmap writes the global ID bitmap to the file
 func (w *Writer) writeGlobalIDBitmap() (uint64, uint64, error) {
-	// Create a new bitmap
-	bitmap := sroar.NewBitmap()
-
-	// Add all IDs to the bitmap
-	for id := range w.globalIDs {
-		bitmap.Set(id)
-	}
-
 	// Get the current position - this is where the bitmap will start
 	bitmapOffset, err := w.file.Seek(0, io.SeekCurrent)
 	if err != nil {
@@ -26,7 +16,7 @@ func (w *Writer) writeGlobalIDBitmap() (uint64, uint64, error) {
 
 	// Get the buffer from the bitmap
 	// The sroar bitmap is already a serialized representation
-	buf := bitmap.ToBuffer()
+	buf := w.globalIDs.ToBuffer()
 
 	// Write the size of the bitmap
 	if err := binary.Write(w.file, binary.LittleEndian, uint32(len(buf))); err != nil {

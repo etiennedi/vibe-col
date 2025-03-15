@@ -16,9 +16,9 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 		return fmt.Errorf("cannot write empty block")
 	}
 
-	// Add all IDs to the global ID set
+	// Add all IDs to the global ID bitmap
 	for _, id := range ids {
-		w.globalIDs[id] = struct{}{}
+		w.globalIDs.Set(id)
 	}
 
 	// Determine if we need to use variable-length encoding
