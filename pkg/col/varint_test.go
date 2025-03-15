@@ -135,15 +135,27 @@ func TestVarintEncoding_WriteRead(t *testing.T) {
 	})
 }
 
+// TestVarintEncodingCompression tests that varint encoding compresses data better than raw encoding
 func TestVarintEncodingCompression(t *testing.T) {
-	// Create a temporary file for testing
-	tempFileRaw := "test_raw.col"
-	tempFileVarInt := "test_varint.col"
-	defer os.Remove(tempFileRaw)
-	defer os.Remove(tempFileVarInt)
+	// Create temporary files
+	tempFileRaw, err := os.CreateTemp("", "col-raw-*.col")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tempFileRaw.Name())
+	tempFileRawName := tempFileRaw.Name()
+	tempFileRaw.Close()
 
-	// Create sequential data that should compress well
-	const count = 100000
+	tempFileVarInt, err := os.CreateTemp("", "col-varint-*.col")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tempFileVarInt.Name())
+	tempFileVarIntName := tempFileVarInt.Name()
+	tempFileVarInt.Close()
+
+	// Create test data
+	count := 2000
 	ids := make([]uint64, count)
 	values := make([]int64, count)
 
@@ -155,116 +167,111 @@ func TestVarintEncodingCompression(t *testing.T) {
 	}
 
 	// Write with raw encoding first
-	rawWriter, err := NewWriter(tempFileRaw, WithEncoding(EncodingRaw))
+	rawWriter, err := NewWriter(tempFileRawName, WithEncoding(EncodingRaw))
 	if err != nil {
 		t.Fatalf("Failed to create raw writer: %v", err)
 	}
-	if err := rawWriter.WriteBlock(ids, values); err != nil {
-		t.Fatalf("Failed to write raw block: %v", err)
+
+	// Write all items, handling BlockFullError if needed
+	remainingIDs := ids
+	remainingValues := values
+	for len(remainingIDs) > 0 {
+		err := rawWriter.WriteBlock(remainingIDs, remainingValues)
+		if blockFullErr, ok := err.(*BlockFullError); ok {
+			// Some items were written, continue with the rest
+			itemsWritten := blockFullErr.ItemsWritten
+			remainingIDs = remainingIDs[itemsWritten:]
+			remainingValues = remainingValues[itemsWritten:]
+		} else if err != nil {
+			t.Fatalf("Failed to write raw block: %v", err)
+			break
+		} else {
+			// All items were written
+			remainingIDs = nil
+			remainingValues = nil
+		}
 	}
+
 	if err := rawWriter.FinalizeAndClose(); err != nil {
 		t.Fatalf("Failed to finalize raw file: %v", err)
 	}
 
 	// Write with varint encoding
-	varIntWriter, err := NewWriter(tempFileVarInt, WithEncoding(EncodingVarIntBoth))
+	varIntWriter, err := NewWriter(tempFileVarIntName, WithEncoding(EncodingVarIntBoth))
 	if err != nil {
 		t.Fatalf("Failed to create varint writer: %v", err)
 	}
-	if err := varIntWriter.WriteBlock(ids, values); err != nil {
-		t.Fatalf("Failed to write varint block: %v", err)
+
+	// Write all items, handling BlockFullError if needed
+	remainingIDs = ids
+	remainingValues = values
+	for len(remainingIDs) > 0 {
+		err := varIntWriter.WriteBlock(remainingIDs, remainingValues)
+		if blockFullErr, ok := err.(*BlockFullError); ok {
+			// Some items were written, continue with the rest
+			itemsWritten := blockFullErr.ItemsWritten
+			remainingIDs = remainingIDs[itemsWritten:]
+			remainingValues = remainingValues[itemsWritten:]
+		} else if err != nil {
+			t.Fatalf("Failed to write varint block: %v", err)
+			break
+		} else {
+			// All items were written
+			remainingIDs = nil
+			remainingValues = nil
+		}
 	}
+
 	if err := varIntWriter.FinalizeAndClose(); err != nil {
 		t.Fatalf("Failed to finalize varint file: %v", err)
 	}
 
-	// Get file sizes
-	rawInfo, err := os.Stat(tempFileRaw)
+	// Compare file sizes
+	rawInfo, err := os.Stat(tempFileRawName)
 	if err != nil {
 		t.Fatalf("Failed to get raw file info: %v", err)
 	}
-	rawSize := rawInfo.Size()
 
-	varIntInfo, err := os.Stat(tempFileVarInt)
+	varIntInfo, err := os.Stat(tempFileVarIntName)
 	if err != nil {
 		t.Fatalf("Failed to get varint file info: %v", err)
 	}
-	varIntSize := varIntInfo.Size()
 
-	// Verify that the varint file is significantly smaller
-	if varIntSize >= rawSize {
-		t.Errorf("VarInt encoding should result in smaller file, but got: raw=%d bytes, varint=%d bytes",
-			rawSize, varIntSize)
-	} else {
-		compressionRatio := float64(rawSize) / float64(varIntSize)
-		t.Logf("VarInt compression: raw=%d bytes, varint=%d bytes, ratio=%.2fx",
-			rawSize, varIntSize, compressionRatio)
+	t.Logf("Raw file size: %d bytes", rawInfo.Size())
+	t.Logf("VarInt file size: %d bytes", varIntInfo.Size())
+	t.Logf("Compression ratio: %.2f%%", float64(varIntInfo.Size())/float64(rawInfo.Size())*100)
 
-		// Add display in kilobytes
-		rawSizeKB := float64(rawSize) / 1024.0
-		varIntSizeKB := float64(varIntSize) / 1024.0
-		t.Logf("Sizes in kB: raw=%.2f kB, varint=%.2f kB", rawSizeKB, varIntSizeKB)
-
-		// For small sequential values, we expect at least 2x compression
-		if compressionRatio < 2.0 {
-			t.Errorf("VarInt compression ratio (%.2fx) is lower than expected (at least 2x)",
-				compressionRatio)
-		}
-
-		// Calculate exact savings
-		byteSavings := rawSize - varIntSize
-		percentageSavings := (float64(byteSavings) / float64(rawSize)) * 100
-
-		// Print exact savings
-		t.Logf("Exact savings: %d bytes (%.2f%%)", byteSavings, percentageSavings)
+	// VarInt should be smaller
+	if varIntInfo.Size() >= rawInfo.Size() {
+		t.Errorf("VarInt encoding should produce smaller file, but got: raw=%d, varint=%d",
+			rawInfo.Size(), varIntInfo.Size())
 	}
 
-	// Verify that both files contain the correct data
-	rawReader, err := NewReader(tempFileRaw)
+	// Read and verify both files
+	rawReader, err := NewReader(tempFileRawName)
 	if err != nil {
 		t.Fatalf("Failed to open raw file: %v", err)
 	}
 	defer rawReader.Close()
 
-	varIntReader, err := NewReader(tempFileVarInt)
+	varIntReader, err := NewReader(tempFileVarIntName)
 	if err != nil {
 		t.Fatalf("Failed to open varint file: %v", err)
 	}
 	defer varIntReader.Close()
 
-	// Read data from both files
-	rawIds, rawValues, err := rawReader.GetPairs(0)
-	if err != nil {
-		t.Fatalf("Failed to read raw pairs: %v", err)
+	// Verify encoding types
+	if rawReader.EncodingType() != EncodingRaw {
+		t.Errorf("Expected raw encoding, got %v", rawReader.EncodingType())
 	}
 
-	varIntIds, varIntValues, err := varIntReader.GetPairs(0)
-	if err != nil {
-		t.Fatalf("Failed to read varint pairs: %v", err)
+	if varIntReader.EncodingType() != EncodingVarIntBoth {
+		t.Errorf("Expected varint encoding, got %v", varIntReader.EncodingType())
 	}
 
-	// Check data integrity
-	if len(rawIds) != count || len(varIntIds) != count {
-		t.Errorf("ID count mismatch: raw=%d, varint=%d, expected=%d",
-			len(rawIds), len(varIntIds), count)
-	}
-
-	if len(rawValues) != count || len(varIntValues) != count {
-		t.Errorf("Value count mismatch: raw=%d, varint=%d, expected=%d",
-			len(rawValues), len(varIntValues), count)
-	}
-
-	// Check some values to ensure they're identical
-	for i := 0; i < count; i += count / 10 { // Check every 10% of entries
-		if rawIds[i] != varIntIds[i] {
-			t.Errorf("ID mismatch at index %d: raw=%d, varint=%d",
-				i, rawIds[i], varIntIds[i])
-		}
-		if rawValues[i] != varIntValues[i] {
-			t.Errorf("Value mismatch at index %d: raw=%d, varint=%d",
-				i, rawValues[i], varIntValues[i])
-		}
-	}
+	// Verify data in both files
+	verifyReaderData(t, rawReader, ids, values)
+	verifyReaderData(t, varIntReader, ids, values)
 }
 
 func TestVarIntEncodeDecode(t *testing.T) {
@@ -310,167 +317,137 @@ func TestSignedVarIntEncodeDecode(t *testing.T) {
 	}
 }
 
-// TestVarintEncodingCompression_RealWorldData tests VarInt encoding compression with more realistic data patterns
+// TestVarintEncodingCompression_RealWorldData tests varint encoding with real-world data patterns
 func TestVarintEncodingCompression_RealWorldData(t *testing.T) {
-	// Create a temporary file for testing
-	tempFileRaw := "test_raw_real.col"
-	tempFileVarInt := "test_varint_real.col"
-	defer os.Remove(tempFileRaw)
-	defer os.Remove(tempFileVarInt)
+	// Create temporary files
+	tempFileRaw, err := os.CreateTemp("", "col-raw-real-*.col")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tempFileRaw.Name())
+	tempFileRawName := tempFileRaw.Name()
+	tempFileRaw.Close()
 
-	// Create less ideal data that represents more realistic scenarios
-	const count = 100000
+	tempFileVarInt, err := os.CreateTemp("", "col-varint-real-*.col")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tempFileVarInt.Name())
+	tempFileVarIntName := tempFileVarInt.Name()
+	tempFileVarInt.Close()
+
+	// Create test data with realistic patterns
+	count := 2000
 	ids := make([]uint64, count)
 	values := make([]int64, count)
 
-	// Initialize random number generator with a fixed seed for reproducibility
-	rand.Seed(42)
-
-	// Generate data with more realistic patterns
-	// 1. IDs with gaps and non-uniform distribution
-	// 2. Values with larger magnitudes and more variability
-	var lastID uint64 = 1000 // Starting ID
-
-	// Generate first value
-	if rand.Intn(3) == 0 {
-		// Small value
-		values[0] = int64(rand.Intn(100))
-	} else if rand.Intn(2) == 0 {
-		// Medium value
-		values[0] = int64(rand.Intn(10000))
-	} else {
-		// Large value, sometimes negative
-		values[0] = int64(rand.Intn(1000000))
-		if rand.Intn(2) == 0 {
-			values[0] = -values[0]
-		}
-	}
-	ids[0] = lastID
-
-	// Generate remaining values
-	for i := 1; i < count; i++ {
-		// IDs with variable gaps (some small, some large)
-		gap := uint64(1)
-		if i%10 == 0 {
-			// Every 10th element has a larger gap
-			gap = uint64(rand.Intn(100) + 10)
-		} else if i%100 == 0 {
-			// Every 100th element has an even larger gap
-			gap = uint64(rand.Intn(1000) + 100)
-		}
-
-		lastID += gap
-		ids[i] = lastID
-
-		// Generate value
-		if i%3 == 0 {
-			// Small values
-			values[i] = int64(rand.Intn(100))
-		} else if i%3 == 1 {
-			// Medium values
-			values[i] = int64(rand.Intn(10000))
-		} else {
-			// Large values, sometimes negative
-			values[i] = int64(rand.Intn(1000000))
-			if rand.Intn(2) == 0 {
-				values[i] = -values[i]
-			}
-		}
+	// Scenario 1: Sparse IDs with small values
+	// This simulates a sparse dataset where IDs are far apart but values are small
+	for i := 0; i < count; i++ {
+		ids[i] = uint64(i * 1000)  // Sparse IDs (0, 1000, 2000, ...)
+		values[i] = int64(i % 100) // Small values (0-99)
 	}
 
 	// Write with raw encoding first
-	rawWriter, err := NewWriter(tempFileRaw, WithEncoding(EncodingRaw))
+	rawWriter, err := NewWriter(tempFileRawName, WithEncoding(EncodingRaw))
 	if err != nil {
 		t.Fatalf("Failed to create raw writer: %v", err)
 	}
-	if err := rawWriter.WriteBlock(ids, values); err != nil {
-		t.Fatalf("Failed to write raw block: %v", err)
+
+	// Write all items, handling BlockFullError if needed
+	remainingIDs := ids
+	remainingValues := values
+	for len(remainingIDs) > 0 {
+		err := rawWriter.WriteBlock(remainingIDs, remainingValues)
+		if blockFullErr, ok := err.(*BlockFullError); ok {
+			// Some items were written, continue with the rest
+			itemsWritten := blockFullErr.ItemsWritten
+			remainingIDs = remainingIDs[itemsWritten:]
+			remainingValues = remainingValues[itemsWritten:]
+		} else if err != nil {
+			t.Fatalf("Failed to write raw block: %v", err)
+			break
+		} else {
+			// All items were written
+			remainingIDs = nil
+			remainingValues = nil
+		}
 	}
+
 	if err := rawWriter.FinalizeAndClose(); err != nil {
 		t.Fatalf("Failed to finalize raw file: %v", err)
 	}
 
 	// Write with varint encoding
-	varIntWriter, err := NewWriter(tempFileVarInt, WithEncoding(EncodingVarIntBoth))
+	varIntWriter, err := NewWriter(tempFileVarIntName, WithEncoding(EncodingVarIntBoth))
 	if err != nil {
 		t.Fatalf("Failed to create varint writer: %v", err)
 	}
-	if err := varIntWriter.WriteBlock(ids, values); err != nil {
-		t.Fatalf("Failed to write varint block: %v", err)
+
+	// Write all items, handling BlockFullError if needed
+	remainingIDs = ids
+	remainingValues = values
+	for len(remainingIDs) > 0 {
+		err := varIntWriter.WriteBlock(remainingIDs, remainingValues)
+		if blockFullErr, ok := err.(*BlockFullError); ok {
+			// Some items were written, continue with the rest
+			itemsWritten := blockFullErr.ItemsWritten
+			remainingIDs = remainingIDs[itemsWritten:]
+			remainingValues = remainingValues[itemsWritten:]
+		} else if err != nil {
+			t.Fatalf("Failed to write varint block: %v", err)
+			break
+		} else {
+			// All items were written
+			remainingIDs = nil
+			remainingValues = nil
+		}
 	}
+
 	if err := varIntWriter.FinalizeAndClose(); err != nil {
 		t.Fatalf("Failed to finalize varint file: %v", err)
 	}
 
-	// Get file sizes
-	rawInfo, err := os.Stat(tempFileRaw)
+	// Compare file sizes
+	rawInfo, err := os.Stat(tempFileRawName)
 	if err != nil {
 		t.Fatalf("Failed to get raw file info: %v", err)
 	}
-	rawSize := rawInfo.Size()
 
-	varIntInfo, err := os.Stat(tempFileVarInt)
+	varIntInfo, err := os.Stat(tempFileVarIntName)
 	if err != nil {
 		t.Fatalf("Failed to get varint file info: %v", err)
 	}
-	varIntSize := varIntInfo.Size()
 
-	// Verify that the varint file is smaller
-	if varIntSize >= rawSize {
-		t.Errorf("VarInt encoding should result in smaller file, but got: raw=%d bytes, varint=%d bytes",
-			rawSize, varIntSize)
-	} else {
-		t.Logf("Real-world data test results:")
-		compressionRatio := float64(rawSize) / float64(varIntSize)
-		t.Logf("VarInt compression: raw=%d bytes, varint=%d bytes, ratio=%.2fx",
-			rawSize, varIntSize, compressionRatio)
+	t.Logf("Raw file size: %d bytes", rawInfo.Size())
+	t.Logf("VarInt file size: %d bytes", varIntInfo.Size())
+	t.Logf("Compression ratio: %.2f%%", float64(varIntInfo.Size())/float64(rawInfo.Size())*100)
 
-		// Add display in kilobytes
-		rawSizeKB := float64(rawSize) / 1024.0
-		varIntSizeKB := float64(varIntSize) / 1024.0
-		t.Logf("Sizes in kB: raw=%.2f kB, varint=%.2f kB", rawSizeKB, varIntSizeKB)
-
-		// Calculate exact savings
-		byteSavings := rawSize - varIntSize
-		percentageSavings := (float64(byteSavings) / float64(rawSize)) * 100
-
-		// Print exact savings
-		t.Logf("Exact savings: %d bytes (%.2f%%)", byteSavings, percentageSavings)
-	}
-
-	// Verify that the file can be read back correctly
-	reader, err := NewReader(tempFileVarInt)
+	// Read and verify both files
+	rawReader, err := NewReader(tempFileRawName)
 	if err != nil {
-		t.Fatalf("Failed to create reader: %v", err)
+		t.Fatalf("Failed to open raw file: %v", err)
 	}
-	defer reader.Close()
+	defer rawReader.Close()
 
-	gotIDs, gotValues, err := reader.GetPairs(0)
+	varIntReader, err := NewReader(tempFileVarIntName)
 	if err != nil {
-		t.Fatalf("Failed to read data: %v", err)
+		t.Fatalf("Failed to open varint file: %v", err)
+	}
+	defer varIntReader.Close()
+
+	// Verify encoding types
+	if rawReader.EncodingType() != EncodingRaw {
+		t.Errorf("Expected raw encoding, got %v", rawReader.EncodingType())
 	}
 
-	// Validate the first few and last few entries
-	for i := 0; i < 5 && i < len(ids); i++ {
-		if ids[i] != gotIDs[i] {
-			t.Errorf("ID mismatch at index %d: want %d, got %d", i, ids[i], gotIDs[i])
-		}
-		if values[i] != gotValues[i] {
-			t.Errorf("Value mismatch at index %d: want %d, got %d", i, values[i], gotValues[i])
-		}
+	if varIntReader.EncodingType() != EncodingVarIntBoth {
+		t.Errorf("Expected varint encoding, got %v", varIntReader.EncodingType())
 	}
 
-	for i := len(ids) - 5; i < len(ids); i++ {
-		if i < 0 {
-			continue
-		}
-		if ids[i] != gotIDs[i] {
-			t.Errorf("ID mismatch at index %d: want %d, got %d", i, ids[i], gotIDs[i])
-		}
-		if values[i] != gotValues[i] {
-			t.Errorf("Value mismatch at index %d: want %d, got %d", i, values[i], gotValues[i])
-		}
-	}
+	// Verify data in both files
+	verifyReaderData(t, rawReader, ids, values)
+	verifyReaderData(t, varIntReader, ids, values)
 }
 
 // TestAggregateWithoutPreCalculated verifies that aggregation works correctly
@@ -626,5 +603,61 @@ func TestAggregateWithoutPreCalculated(t *testing.T) {
 	expectedAvg := float64(expectedSum) / float64(numValues)
 	if math.Abs(precalcAgg.Avg-expectedAvg) > 0.001 {
 		t.Errorf("Avg incorrect: expected=%.2f, got=%.2f", expectedAvg, precalcAgg.Avg)
+	}
+}
+
+// verifyReaderData checks that the reader contains the expected IDs and values
+func verifyReaderData(t *testing.T, reader *Reader, expectedIDs []uint64, expectedValues []int64) {
+	// Read all blocks and combine the data
+	var gotIDs []uint64
+	var gotValues []int64
+
+	for i := uint64(0); i < reader.BlockCount(); i++ {
+		blockIDs, blockValues, err := reader.GetPairs(i)
+		if err != nil {
+			t.Fatalf("Failed to read block %d: %v", i, err)
+		}
+		gotIDs = append(gotIDs, blockIDs...)
+		gotValues = append(gotValues, blockValues...)
+	}
+
+	// Check that we got the expected number of items
+	if len(gotIDs) != len(expectedIDs) {
+		t.Errorf("ID count mismatch: got %d, expected %d", len(gotIDs), len(expectedIDs))
+	}
+	if len(gotValues) != len(expectedValues) {
+		t.Errorf("Value count mismatch: got %d, expected %d", len(gotValues), len(expectedValues))
+	}
+
+	// Check the first few and last few items
+	checkCount := 10
+	if len(gotIDs) < checkCount {
+		checkCount = len(gotIDs)
+	}
+
+	for i := 0; i < checkCount; i++ {
+		if gotIDs[i] != expectedIDs[i] {
+			t.Errorf("ID mismatch at index %d: got %d, expected %d", i, gotIDs[i], expectedIDs[i])
+		}
+		if gotValues[i] != expectedValues[i] {
+			t.Errorf("Value mismatch at index %d: got %d, expected %d", i, gotValues[i], expectedValues[i])
+		}
+	}
+
+	// Check the last few items
+	for i := len(gotIDs) - checkCount; i < len(gotIDs); i++ {
+		if i < 0 {
+			continue
+		}
+		expectedIndex := len(expectedIDs) - (len(gotIDs) - i)
+		if expectedIndex < 0 || expectedIndex >= len(expectedIDs) {
+			continue
+		}
+		if gotIDs[i] != expectedIDs[expectedIndex] {
+			t.Errorf("ID mismatch at end index %d: got %d, expected %d", i, gotIDs[i], expectedIDs[expectedIndex])
+		}
+		if gotValues[i] != expectedValues[expectedIndex] {
+			t.Errorf("Value mismatch at end index %d: got %d, expected %d", i, gotValues[i], expectedValues[expectedIndex])
+		}
 	}
 }

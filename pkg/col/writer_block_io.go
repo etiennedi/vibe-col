@@ -6,7 +6,18 @@ import (
 	"io"
 )
 
+// BlockFullError is returned when a block would exceed the target size
+type BlockFullError struct {
+	ItemsWritten int // Number of items successfully written
+}
+
+func (e *BlockFullError) Error() string {
+	return fmt.Sprintf("block full after writing %d items", e.ItemsWritten)
+}
+
 // WriteBlock writes a block of ID-value pairs
+// If the block would exceed the target size, it writes as many items as possible
+// and returns a BlockFullError with information about how many items were written
 func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	if len(ids) != len(values) {
 		return fmt.Errorf("ids and values must have the same length")
@@ -16,6 +27,49 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 		return fmt.Errorf("cannot write empty block")
 	}
 
+	// First, check if the entire block would exceed the target size
+	estimatedSize, err := w.EstimateBlockSize(ids, values)
+	if err != nil {
+		return fmt.Errorf("failed to estimate block size: %w", err)
+	}
+
+	// If the block would exceed the target size and we have more than one item,
+	// try to find the maximum number of items that would fit
+	if estimatedSize > uint64(w.blockSizeTarget) && len(ids) > 1 {
+		// Start with a single item and incrementally add more until we reach the target size
+		var optimal int = 1
+
+		// Try each size from 1 to len(ids)-1
+		for i := 1; i < len(ids); i++ {
+			size, err := w.EstimateBlockSize(ids[:i], values[:i])
+			if err != nil {
+				break
+			}
+
+			if size <= uint64(w.blockSizeTarget) {
+				optimal = i
+			} else {
+				// We've exceeded the target size, stop here
+				break
+			}
+		}
+
+		// Write the partial block
+		if err := w.writeBlockInternal(ids[:optimal], values[:optimal]); err != nil {
+			return err
+		}
+
+		// Return a BlockFullError with the number of items written
+		return &BlockFullError{ItemsWritten: optimal}
+	}
+
+	// If we get here, either the block fits or we couldn't find a partial solution
+	return w.writeBlockInternal(ids, values)
+}
+
+// writeBlockInternal is the actual implementation of WriteBlock
+// It writes the block without checking the target size
+func (w *Writer) writeBlockInternal(ids []uint64, values []int64) error {
 	// Add all IDs to the global ID bitmap
 	for _, id := range ids {
 		w.globalIDs.Set(id)
@@ -267,4 +321,48 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	}
 
 	return nil
+}
+
+// EstimateBlockSize calculates the exact size a block would be without writing it
+// This is useful for determining if a block would fit within a target size
+func (w *Writer) EstimateBlockSize(ids []uint64, values []int64) (uint64, error) {
+	if len(ids) != len(values) {
+		return 0, fmt.Errorf("ids and values must have the same length")
+	}
+
+	if len(ids) == 0 {
+		return 0, fmt.Errorf("cannot estimate empty block")
+	}
+
+	// Encode IDs and values to get exact sizes
+	_, _, idSectionSize, err := w.encodeIDs(ids)
+	if err != nil {
+		return 0, err
+	}
+
+	_, _, valueSectionSize, err := w.encodeValues(values)
+	if err != nil {
+		return 0, err
+	}
+
+	// Calculate total block size
+	// Block header + block layout + ID section + value section
+	totalSize := uint64(blockHeaderSize + blockLayoutSize + idSectionSize + valueSectionSize)
+
+	// Add padding size if needed for page alignment
+	currentPos, err := w.file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get current position: %w", err)
+	}
+
+	// Calculate where the block would end
+	blockEnd := currentPos + int64(totalSize)
+
+	// Add padding if needed
+	padding := calculatePadding(blockEnd, PageSize)
+	if padding > 0 {
+		totalSize += uint64(padding)
+	}
+
+	return totalSize, nil
 }
