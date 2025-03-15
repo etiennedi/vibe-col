@@ -5,8 +5,9 @@ import (
 	"fmt"
 )
 
-// readBlock reads a block from the file
-func (r *Reader) readBlock(blockIndex int) ([]uint64, []int64, error) {
+// readEntireBlock reads an entire block from the file in a single syscall
+// and returns the parsed IDs and values
+func (r *Reader) readEntireBlock(blockIndex int) ([]uint64, []int64, error) {
 	// Validate block index
 	if blockIndex < 0 || blockIndex >= len(r.blockIndex) {
 		return nil, nil, fmt.Errorf("invalid block index: %d", blockIndex)
@@ -17,22 +18,17 @@ func (r *Reader) readBlock(blockIndex int) ([]uint64, []int64, error) {
 	blockSize := int64(r.blockIndex[blockIndex].BlockSize)
 	count := int(r.blockIndex[blockIndex].Count)
 
-	// Read the entire block data in one call (excluding the block header)
-	// We need to read the layout section (16 bytes) and the data sections
-	dataOffset := blockOffset + blockHeaderSize
-	dataSize := int(blockSize) - blockHeaderSize
-
-	// Read all data after the header in one call
-	blockData, err := r.readBytesAt(dataOffset, dataSize)
+	// Read the entire block in a single syscall
+	blockData, err := r.readBytesAt(blockOffset, int(blockSize))
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read block data: %w", err)
+		return nil, nil, fmt.Errorf("failed to read block: %w", err)
 	}
 
-	// Parse the layout section (first 16 bytes)
-	idSectionOffset := binary.LittleEndian.Uint32(blockData[0:4])
-	idSectionSize := binary.LittleEndian.Uint32(blockData[4:8])
-	valueSectionOffset := binary.LittleEndian.Uint32(blockData[8:12])
-	valueSectionSize := binary.LittleEndian.Uint32(blockData[12:16])
+	// Skip the block header (64 bytes) and parse the layout section (next 16 bytes)
+	idSectionOffset := binary.LittleEndian.Uint32(blockData[blockHeaderSize : blockHeaderSize+4])
+	idSectionSize := binary.LittleEndian.Uint32(blockData[blockHeaderSize+4 : blockHeaderSize+8])
+	valueSectionOffset := binary.LittleEndian.Uint32(blockData[blockHeaderSize+8 : blockHeaderSize+12])
+	valueSectionSize := binary.LittleEndian.Uint32(blockData[blockHeaderSize+12 : blockHeaderSize+16])
 
 	// Validate header values
 	if idSectionSize == 0 {
@@ -43,11 +39,11 @@ func (r *Reader) readBlock(blockIndex int) ([]uint64, []int64, error) {
 	}
 
 	// Extract ID and value sections from the buffer
-	// The layout section is 16 bytes, followed by the data sections
-	idStart := 16 + int(idSectionOffset)
+	// The layout section is 16 bytes after the block header, followed by the data sections
+	idStart := blockHeaderSize + 16 + int(idSectionOffset)
 	idEnd := idStart + int(idSectionSize)
 
-	valueStart := 16 + int(valueSectionOffset)
+	valueStart := blockHeaderSize + 16 + int(valueSectionOffset)
 	valueEnd := valueStart + int(valueSectionSize)
 
 	// Validate buffer boundaries
@@ -66,4 +62,10 @@ func (r *Reader) readBlock(blockIndex int) ([]uint64, []int64, error) {
 	}
 
 	return ids, values, nil
+}
+
+// readBlock reads a block from the file
+// This is now a wrapper around readEntireBlock for backward compatibility
+func (r *Reader) readBlock(blockIndex int) ([]uint64, []int64, error) {
+	return r.readEntireBlock(blockIndex)
 }

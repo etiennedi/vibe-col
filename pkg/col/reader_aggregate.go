@@ -98,8 +98,9 @@ func (r *Reader) AggregateWithOptions(opts AggregateOptions) AggregateResult {
 	var max int64 = -9223372036854775808 // Min int64
 	var sum int64 = 0
 
-	for i := uint64(0); i < r.header.BlockCount; i++ {
-		_, values, err := r.GetPairs(i)
+	for i := 0; i < len(r.blockIndex); i++ {
+		// Read block
+		_, values, err := r.readEntireBlock(i)
 		if err != nil {
 			// Skip blocks with errors
 			continue
@@ -175,28 +176,26 @@ func (r *Reader) FilteredBlockIterator(filter, denyFilter *sroar.Bitmap) []uint6
 	return matchingBlocks
 }
 
-// readBlockFiltered reads a block and filters values based on the allow and deny bitmaps
+// readBlockFiltered reads a block and filters the results based on the provided bitmap
 func (r *Reader) readBlockFiltered(blockIndex int, filter, denyFilter *sroar.Bitmap) ([]uint64, []int64, error) {
-	// Read the entire block
-	allIDs, allValues, err := r.readBlock(blockIndex)
+	// Read the entire block using the optimized method
+	allIDs, allValues, err := r.readEntireBlock(blockIndex)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// If no filters are provided, return all values
+	// If no filter is provided, return all data
 	if filter == nil && denyFilter == nil {
 		return allIDs, allValues, nil
 	}
 
-	// Filter IDs and values
+	// Apply filtering
 	filteredIDs := make([]uint64, 0, len(allIDs))
 	filteredValues := make([]int64, 0, len(allValues))
 
 	for i, id := range allIDs {
-		// Check if ID is allowed (either no allow filter or ID is in allow filter)
+		// Check if ID is allowed by the filter
 		isAllowed := filter == nil || filter.Contains(id)
-
-		// Check if ID is denied (ID is in deny filter)
 		isDenied := denyFilter != nil && denyFilter.Contains(id)
 
 		// Include ID if it's allowed and not denied
@@ -232,7 +231,7 @@ func (r *Reader) aggregateWithFilter(opts AggregateOptions) AggregateResult {
 	var sum int64 = 0
 
 	for _, blockIdx := range matchingBlocks {
-		// Read block with filtering
+		// Read block with filtering using the optimized method
 		_, values, err := r.readBlockFiltered(int(blockIdx), opts.Filter, opts.DenyFilter)
 		if err != nil {
 			// Skip blocks with errors
@@ -467,11 +466,11 @@ func (r *Reader) aggregateParallelWithReading(blockIndices []uint64, opts Aggreg
 				var err error
 
 				if opts.Filter != nil || opts.DenyFilter != nil {
-					// Read block with filtering
+					// Read block with filtering using the optimized method
 					_, values, err = r.readBlockFiltered(int(blockIdx), opts.Filter, opts.DenyFilter)
 				} else {
-					// Read block without filtering
-					_, values, err = r.GetPairs(blockIdx)
+					// Read block without filtering using the optimized method
+					_, values, err = r.readEntireBlock(int(blockIdx))
 				}
 
 				if err != nil {
@@ -479,6 +478,7 @@ func (r *Reader) aggregateParallelWithReading(blockIndices []uint64, opts Aggreg
 					continue
 				}
 
+				// Process values for aggregation
 				count += len(values)
 				for _, v := range values {
 					if v < min {
@@ -512,7 +512,7 @@ func (r *Reader) aggregateParallelWithReading(blockIndices []uint64, opts Aggreg
 	wg.Wait()
 	close(resultChan)
 
-	// Merge results
+	// Combine results from all workers
 	var finalResult AggregateResult
 	var totalCount int
 	var totalSum int64
