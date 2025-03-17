@@ -22,6 +22,9 @@ func NewSimpleWriter(filename string, options ...WriterOption) (*SimpleWriter, e
 	// Default target block size
 	targetBlockSize := 128 * 1024 // 128KB default block size
 
+	// Add our target block size to the writer options
+	options = append(options, WithBlockSize(uint32(targetBlockSize)))
+
 	// Create the underlying writer
 	writer, err := NewWriter(filename, options...)
 	if err != nil {
@@ -129,9 +132,18 @@ func (sw *SimpleWriter) flushIfNeeded(force bool) error {
 
 	// If not forced, check if we have enough data to write a block
 	if !force {
-		// Try to write a block when we have a reasonable amount of data
-		// This ensures we create multiple blocks for large datasets
-		shouldWrite = len(sw.pendingIDs) >= 1000 // Try to write after accumulating 1000 items
+		// The target block size is in bytes (e.g., 128KB), but we're comparing to entry counts
+		// A typical entry is about 16 bytes (8 for ID, 8 for value), so we divide the target size
+		// by 16 to get a reasonable entry count threshold
+		const bytesPerEntry = 16
+		entriesPerBlock := sw.targetBlockSize / bytesPerEntry
+
+		// Ensure we have a reasonable minimum (at least 1000 entries per block)
+		if entriesPerBlock < 1000 {
+			entriesPerBlock = 1000
+		}
+
+		shouldWrite = len(sw.pendingIDs) >= entriesPerBlock
 	}
 
 	if shouldWrite {

@@ -6,16 +6,17 @@ import (
 	"vibe-lsm/pkg/col"
 )
 
-// CompactionOptions contains options for the compaction process
+// CompactionOptions contains configuration options for the compaction process
 type CompactionOptions struct {
-	// TargetBlockSize specifies the target size of the output blocks
-	TargetBlockSize int
+	TargetBlockSize int    // Target block size in number of entries (0 means use default)
+	EncodingType    uint32 // Encoding type to use for the output file (0 means use default)
 }
 
 // DefaultCompactionOptions returns the default options for compaction
 func DefaultCompactionOptions() CompactionOptions {
 	return CompactionOptions{
-		TargetBlockSize: 1024, // Default to 1024 entries per block
+		TargetBlockSize: 0, // Use the default block size from SimpleWriter (128KB)
+		EncodingType:    0, // Default encoding (raw)
 	}
 }
 
@@ -136,112 +137,86 @@ func (b *BlockBuffer) IsEmpty() bool {
 // The leftReader contains older data, and the rightReader contains newer data.
 // When the same ID appears in both segments, the value from the rightReader takes precedence.
 func Compact(leftReader, rightReader *col.Reader, outputPath string, opts CompactionOptions) error {
-	// Create the output writer
-	writer, err := col.NewSimpleWriter(outputPath)
+	// Create the SimpleWriter with the specified encoding options
+	writerOptions := []col.WriterOption{}
+
+	// If an encoding type is specified, use it
+	if opts.EncodingType != 0 {
+		writerOptions = append(writerOptions, col.WithEncoding(opts.EncodingType))
+	}
+
+	// Create the writer with the configured options
+	writer, err := col.NewSimpleWriter(outputPath, writerOptions...)
 	if err != nil {
 		return fmt.Errorf("failed to create output writer: %w", err)
 	}
 	defer writer.Close()
 
-	// Set target block size
-	if opts.TargetBlockSize > 0 {
-		writer.SetTargetBlockSize(opts.TargetBlockSize)
-	}
-
-	// Create buffer for collecting entries
-	buffer := NewBlockBuffer(opts.TargetBlockSize)
-
-	// Create iterators for both segments
+	// Create iterators for both readers
 	leftIter := NewBlockIterator(leftReader)
 	rightIter := NewBlockIterator(rightReader)
 
-	// Initialize state variables
-	var leftHasNext, rightHasNext bool
-	var leftID, rightID uint64
-	var leftValue, rightValue int64
-
 	// Prime the iterators
-	leftHasNext = leftIter.Next()
-	rightHasNext = rightIter.Next()
+	leftHasData := leftIter.Next()
+	rightHasData := rightIter.Next()
 
-	if leftHasNext {
-		leftID = leftIter.CurrentID()
-		leftValue = leftIter.CurrentValue()
-	}
+	// Prepare a buffer with a cap of 500,000 entries to limit memory usage
+	const bufferCap = 500000
+	batchIDs := make([]uint64, 0, bufferCap)
+	batchValues := make([]int64, 0, bufferCap)
 
-	if rightHasNext {
-		rightID = rightIter.CurrentID()
-		rightValue = rightIter.CurrentValue()
-	}
-
-	// Main merge loop - continue while either iterator has more entries
-	for leftHasNext || rightHasNext {
-		// Determine which entry to process next
-		if !leftHasNext {
-			// Only right has more entries
-			buffer.Add(rightID, rightValue)
-			rightHasNext = rightIter.Next()
-			if rightHasNext {
-				rightID = rightIter.CurrentID()
-				rightValue = rightIter.CurrentValue()
-			}
-		} else if !rightHasNext {
-			// Only left has more entries
-			buffer.Add(leftID, leftValue)
-			leftHasNext = leftIter.Next()
-			if leftHasNext {
-				leftID = leftIter.CurrentID()
-				leftValue = leftIter.CurrentValue()
-			}
+	// Process all entries from both readers using merge-sort algorithm
+	for leftHasData || rightHasData {
+		// Determine which entry (or entries) to add to the result next
+		if !leftHasData {
+			// Only right reader has more data
+			batchIDs = append(batchIDs, rightIter.CurrentID())
+			batchValues = append(batchValues, rightIter.CurrentValue())
+			rightHasData = rightIter.Next()
+		} else if !rightHasData {
+			// Only left reader has more data
+			batchIDs = append(batchIDs, leftIter.CurrentID())
+			batchValues = append(batchValues, leftIter.CurrentValue())
+			leftHasData = leftIter.Next()
 		} else {
-			// Both have more entries, compare IDs
+			// Both readers have more data, need to compare IDs
+			leftID := leftIter.CurrentID()
+			rightID := rightIter.CurrentID()
+
 			if rightID < leftID {
-				// Process right entry (lower ID)
-				buffer.Add(rightID, rightValue)
-				rightHasNext = rightIter.Next()
-				if rightHasNext {
-					rightID = rightIter.CurrentID()
-					rightValue = rightIter.CurrentValue()
-				}
+				// Take right entry (lower ID)
+				batchIDs = append(batchIDs, rightID)
+				batchValues = append(batchValues, rightIter.CurrentValue())
+				rightHasData = rightIter.Next()
 			} else if leftID < rightID {
-				// Process left entry (lower ID)
-				buffer.Add(leftID, leftValue)
-				leftHasNext = leftIter.Next()
-				if leftHasNext {
-					leftID = leftIter.CurrentID()
-					leftValue = leftIter.CurrentValue()
-				}
+				// Take left entry (lower ID)
+				batchIDs = append(batchIDs, leftID)
+				batchValues = append(batchValues, leftIter.CurrentValue())
+				leftHasData = leftIter.Next()
 			} else {
-				// Equal IDs - take right value, advance both
-				buffer.Add(rightID, rightValue)
-
-				leftHasNext = leftIter.Next()
-				if leftHasNext {
-					leftID = leftIter.CurrentID()
-					leftValue = leftIter.CurrentValue()
-				}
-
-				rightHasNext = rightIter.Next()
-				if rightHasNext {
-					rightID = rightIter.CurrentID()
-					rightValue = rightIter.CurrentValue()
-				}
+				// Same ID - take right value, advance both iterators
+				batchIDs = append(batchIDs, rightID)
+				batchValues = append(batchValues, rightIter.CurrentValue())
+				leftHasData = leftIter.Next()
+				rightHasData = rightIter.Next()
 			}
 		}
 
-		// Check if buffer should be flushed
-		if buffer.ShouldFlush() {
-			if err := writer.Write(buffer.GetIDs(), buffer.GetValues()); err != nil {
-				return fmt.Errorf("failed to write block: %w", err)
+		// Flush to writer when buffer reaches capacity
+		if len(batchIDs) >= bufferCap {
+			if err := writer.Write(batchIDs, batchValues); err != nil {
+				return fmt.Errorf("failed to write batch: %w", err)
 			}
-			buffer.Clear()
+			// Reset the batch buffers
+			batchIDs = batchIDs[:0]
+			batchValues = batchValues[:0]
 		}
 	}
 
-	// Final flush for any remaining entries
-	if !buffer.IsEmpty() {
-		if err := writer.Write(buffer.GetIDs(), buffer.GetValues()); err != nil {
-			return fmt.Errorf("failed to write final block: %w", err)
+	// Write any remaining entries
+	if len(batchIDs) > 0 {
+		if err := writer.Write(batchIDs, batchValues); err != nil {
+			return fmt.Errorf("failed to write final batch: %w", err)
 		}
 	}
 
