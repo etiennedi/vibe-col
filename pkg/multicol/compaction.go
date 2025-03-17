@@ -145,12 +145,24 @@ func Compact(leftReader, rightReader *col.Reader, outputPath string, opts Compac
 		writerOptions = append(writerOptions, col.WithEncoding(opts.EncodingType))
 	}
 
+	// If a target block size is specified, use it
+	if opts.TargetBlockSize > 0 {
+		writerOptions = append(writerOptions, col.WithBlockSize(uint32(opts.TargetBlockSize)))
+	}
+
 	// Create the writer with the configured options
 	writer, err := col.NewSimpleWriter(outputPath, writerOptions...)
 	if err != nil {
 		return fmt.Errorf("failed to create output writer: %w", err)
 	}
 	defer writer.Close()
+
+	// If a target block size is specified, also set it on the SimpleWriter
+	if opts.TargetBlockSize > 0 {
+		if err := writer.SetTargetBlockSize(opts.TargetBlockSize); err != nil {
+			return fmt.Errorf("failed to set target block size: %w", err)
+		}
+	}
 
 	// Create iterators for both readers
 	leftIter := NewBlockIterator(leftReader)
@@ -160,8 +172,9 @@ func Compact(leftReader, rightReader *col.Reader, outputPath string, opts Compac
 	leftHasData := leftIter.Next()
 	rightHasData := rightIter.Next()
 
-	// Prepare a buffer with a cap of 500,000 entries to limit memory usage
-	const bufferCap = 500000
+	// Use a smaller buffer size to avoid issues with large batches
+	// This is a balance between memory usage and write efficiency
+	const bufferCap = 10000
 	batchIDs := make([]uint64, 0, bufferCap)
 	batchValues := make([]int64, 0, bufferCap)
 

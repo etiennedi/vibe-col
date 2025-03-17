@@ -27,44 +27,47 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 		return fmt.Errorf("cannot write empty block")
 	}
 
-	// First, check if the entire block would exceed the target size
-	estimatedSize, err := w.EstimateBlockSize(ids, values)
+	// Get the current position to track how much we've written
+	startPos, err := w.file.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return fmt.Errorf("failed to estimate block size: %w", err)
+		return fmt.Errorf("failed to get current position: %w", err)
 	}
 
-	// If the block would exceed the target size and we have more than one item,
-	// try to find the maximum number of items that would fit
-	if estimatedSize > uint64(w.blockSizeTarget) && len(ids) > 1 {
-		// Start with a single item and incrementally add more until we reach the target size
-		var optimal int = 1
+	// Write the block directly without estimation
+	err = w.writeBlockInternal(ids, values)
 
-		// Try each size from 1 to len(ids)-1
-		for i := 1; i < len(ids); i++ {
-			size, err := w.EstimateBlockSize(ids[:i], values[:i])
-			if err != nil {
-				break
-			}
-
-			if size <= uint64(w.blockSizeTarget) {
-				optimal = i
-			} else {
-				// We've exceeded the target size, stop here
-				break
-			}
-		}
-
-		// Write the partial block
-		if err := w.writeBlockInternal(ids[:optimal], values[:optimal]); err != nil {
-			return err
-		}
-
-		// Return a BlockFullError with the number of items written
-		return &BlockFullError{ItemsWritten: optimal}
+	// If we successfully wrote the block, we're done
+	if err == nil {
+		return nil
 	}
 
-	// If we get here, either the block fits or we couldn't find a partial solution
-	return w.writeBlockInternal(ids, values)
+	// If we got an error that's not a BlockFullError, return it
+	if _, ok := err.(*BlockFullError); !ok {
+		return err
+	}
+
+	// If we got a BlockFullError, get the current position to see how much we wrote
+	endPos, seekErr := w.file.Seek(0, io.SeekCurrent)
+	if seekErr != nil {
+		// If we can't get the position, return the original error
+		return err
+	}
+
+	// Calculate how much we wrote
+	bytesWritten := endPos - startPos
+
+	// If we wrote less than the target size, return the original error
+	if bytesWritten <= int64(w.blockSizeTarget) {
+		return err
+	}
+
+	// If we wrote more than the target size, we need to truncate back to the start
+	// and return a BlockFullError with 0 items written
+	if _, seekErr := w.file.Seek(startPos, io.SeekStart); seekErr != nil {
+		return fmt.Errorf("failed to seek back to start position: %w", seekErr)
+	}
+
+	return &BlockFullError{ItemsWritten: 0}
 }
 
 // writeBlockInternal is the actual implementation of WriteBlock
@@ -100,6 +103,14 @@ func (w *Writer) writeBlockInternal(ids []uint64, values []int64) error {
 	minValue, maxValue := calculateMinMaxInt64(values)
 	sum := calculateSumInt64(values)
 	count := uint32(len(ids))
+
+	// Calculate the expected block size before writing anything
+	expectedSize := uint64(blockHeaderSize + blockLayoutSize + idSectionSize + valueSectionSize)
+
+	// Check if this block would exceed the target size
+	if expectedSize > uint64(w.blockSizeTarget) {
+		return &BlockFullError{ItemsWritten: 0}
+	}
 
 	// Write block header (64 bytes)
 	blockStart, err := w.file.Seek(0, io.SeekCurrent)

@@ -227,3 +227,106 @@ func TestWriteBlockErrorHandling(t *testing.T) {
 		})
 	}
 }
+
+// TestWriterBlockSizes tests that the Writer can create blocks close to the target size
+func TestWriterBlockSizes(t *testing.T) {
+	// Create a temporary file for testing
+	tmpfile, err := os.CreateTemp("", "writer_block_size_test")
+	require.NoError(t, err)
+	defer os.Remove(tmpfile.Name())
+	tmpfile.Close()
+
+	// Test with both raw and varint encoding
+	encodings := []struct {
+		name string
+		enc  uint32
+	}{
+		{"Raw", col.EncodingRaw},
+		{"VarInt", col.EncodingVarInt},
+	}
+
+	for _, encoding := range encodings {
+		t.Run(encoding.name, func(t *testing.T) {
+			// Set target block size to 128KB
+			const targetBlockSize = 128 * 1024
+
+			// Create a SimpleWriter with the specified encoding and block size
+			// SimpleWriter handles block creation automatically
+			writer, err := col.NewSimpleWriter(tmpfile.Name(),
+				col.WithEncoding(encoding.enc),
+				col.WithBlockSize(uint32(targetBlockSize)))
+			require.NoError(t, err)
+
+			// Use a larger batch size for efficiency
+			const batchSize = 10000
+
+			// Create enough entries to fill multiple blocks
+			const numBatches = 10
+
+			// Generate and write test data in batches
+			for i := 0; i < numBatches; i++ {
+				// Generate test data
+				ids := make([]uint64, batchSize)
+				values := make([]int64, batchSize)
+
+				// Fill the arrays with test data
+				for j := 0; j < batchSize; j++ {
+					ids[j] = uint64(i*batchSize + j + 1) // Ensure IDs are unique and sorted
+					values[j] = int64(ids[j] * 10)       // Some arbitrary value
+				}
+
+				// Write the batch
+				err = writer.Write(ids, values)
+				require.NoError(t, err)
+
+				t.Logf("Successfully wrote batch %d of %d items", i+1, batchSize)
+			}
+
+			// Close the writer to finalize the file
+			err = writer.Close()
+			require.NoError(t, err)
+
+			// Open the file for reading to verify block sizes
+			reader, err := col.NewReader(tmpfile.Name())
+			require.NoError(t, err)
+			defer reader.Close()
+
+			// Verify block count
+			actualBlockCount := reader.BlockCount()
+			t.Logf("Got %d blocks", actualBlockCount)
+
+			// If we didn't get any blocks, the test has failed
+			require.Greater(t, actualBlockCount, uint64(0), "No blocks were written")
+
+			// Get file info to check actual file size
+			fileInfo, err := os.Stat(tmpfile.Name())
+			require.NoError(t, err)
+			fileSize := fileInfo.Size()
+
+			// Calculate average block size
+			avgBlockSize := float64(fileSize) / float64(actualBlockCount)
+			avgEfficiency := avgBlockSize / float64(targetBlockSize) * 100.0
+
+			t.Logf("Encoding: %s", encoding.name)
+			t.Logf("Target block size: %d bytes", targetBlockSize)
+			t.Logf("File size: %d bytes", fileSize)
+			t.Logf("Number of blocks: %d", actualBlockCount)
+			t.Logf("Total entries written: %d", numBatches*batchSize)
+			t.Logf("Average block size: %.2f bytes (%.2f%% of target)",
+				avgBlockSize, avgEfficiency)
+
+			// Check for reasonable block efficiency
+			// The efficiency should be at least 30% of the target size
+			minEfficiency := 30.0
+
+			require.GreaterOrEqual(t, avgEfficiency, minEfficiency,
+				"Average block size should be at least %.1f%% of the target (got %.2f%%)",
+				minEfficiency, avgEfficiency)
+
+			// Also check that we're not creating excessively large blocks
+			require.LessOrEqual(t, avgEfficiency, 120.0,
+				"Average block size should be at most 120%% of the target (got %.2f%%)",
+				avgEfficiency)
+		})
+	}
+}
