@@ -79,7 +79,8 @@ func decodeBlockData(idBytes, valueBytes []byte, count int, encodingType uint32)
 		values = make([]int64, count)
 		for i := 0; i < count; i++ {
 			if i*bytesPerValue+bytesPerValue <= len(valueBytes) {
-				values[i] = int64(binary.LittleEndian.Uint64(valueBytes[i*bytesPerValue : i*bytesPerValue+bytesPerValue]))
+				rawValue := binary.LittleEndian.Uint64(valueBytes[i*bytesPerValue : i*bytesPerValue+bytesPerValue])
+				values[i] = uint64ToInt64(rawValue)
 			} else {
 				// Mock test data for out-of-bounds reads
 				values[i] = int64((i + 1) * 100)
