@@ -122,6 +122,17 @@ func (sw *SimpleWriter) TotalItems() uint64 {
 
 // flushIfNeeded writes pending data to a block if there's enough data or if forced
 func (sw *SimpleWriter) flushIfNeeded(force bool) error {
+	return sw.flushIfNeededWithDepth(force, 0)
+}
+
+// flushIfNeededWithDepth is the internal implementation with recursion depth tracking
+func (sw *SimpleWriter) flushIfNeededWithDepth(force bool, depth int) error {
+	// Prevent infinite recursion
+	maxRecursionDepth := 10
+	if depth > maxRecursionDepth {
+		return fmt.Errorf("maximum recursion depth reached (%d), possible cycle in flush logic", maxRecursionDepth)
+	}
+
 	// If there's no data to write, we're done
 	if len(sw.pendingIDs) == 0 {
 		return nil
@@ -132,14 +143,22 @@ func (sw *SimpleWriter) flushIfNeeded(force bool) error {
 
 	// If not forced, check if we have enough data to write a block
 	if !force {
-		// The target block size is in bytes (e.g., 128KB), but we're comparing to entry counts
-		// A typical entry is about 16 bytes (8 for ID, 8 for value), so we divide the target size
-		// by 16 to get a reasonable entry count threshold
-		const bytesPerEntry = 16
+		// Calculate bytes per entry based on the encoding type
+		bytesPerEntry := 16 // Default for raw encoding (8 bytes for ID, 8 bytes for value)
+
+		// For VarInt encoding, we need to estimate more conservatively
+		if sw.writer.encodingType == EncodingVarInt ||
+			sw.writer.encodingType == EncodingVarIntID ||
+			sw.writer.encodingType == EncodingVarIntValue ||
+			sw.writer.encodingType == EncodingVarIntBoth {
+			// VarInt varies in size but for typical data is more efficient - use 10 bytes
+			// This more conservative estimate helps ensure we don't underestimate
+			bytesPerEntry = 10
+		}
 
 		// Calculate the target number of entries per block
-		// Use a higher percentage (95%) of the target block size to ensure we get closer to the target
-		entriesPerBlock := (sw.targetBlockSize * 95 / 100) / bytesPerEntry
+		// Use 98% of the target block size to maximize block utilization
+		entriesPerBlock := (sw.targetBlockSize * 98 / 100) / bytesPerEntry
 
 		// Ensure we have a reasonable minimum (at least 1000 entries per block)
 		if entriesPerBlock < 1000 {
@@ -150,14 +169,15 @@ func (sw *SimpleWriter) flushIfNeeded(force bool) error {
 	}
 
 	if shouldWrite {
-		// If we have enough data, try to estimate the block size first
-		if len(sw.pendingIDs) > 1000 && !force {
+		// Always estimate the block size first if we have enough entries
+		if len(sw.pendingIDs) > 500 && !force {
 			// Try to estimate the block size for the current pending data
 			estimatedSize, err := sw.writer.EstimateBlockSize(sw.pendingIDs, sw.pendingValues)
 			if err == nil {
-				// If the estimated size is significantly below the target, collect more data
-				if float64(estimatedSize) < float64(sw.targetBlockSize)*0.85 {
-					// We're still below 85% of the target, don't flush yet unless forced
+				// Target at least 90% of block size for optimal space utilization
+				targetEfficiency := 0.90
+				if float64(estimatedSize) < float64(sw.targetBlockSize)*targetEfficiency {
+					// We're below our efficiency target, don't flush yet unless forced
 					return nil
 				}
 			}
@@ -179,77 +199,118 @@ func (sw *SimpleWriter) flushIfNeeded(force bool) error {
 		}
 
 		// If we get here, we got a BlockFullError, which means the block would be too large
-		// Let's try writing in smaller batches to find the optimal size
+		// We'll use a binary search approach to find the optimal batch size
 
-		// Start with a reasonable batch size (3/4 of the pending items)
-		batchSize := len(sw.pendingIDs) * 3 / 4
-		if batchSize < 1000 {
-			batchSize = 1000 // Minimum batch size
+		// Initialize search boundaries
+		low := 0
+		high := len(sw.pendingIDs)
+		batchSize := high / 2
+		bestBatchSize := 0
+		bestEfficiency := 0.0
+
+		// Binary search with a maximum of 8 iterations to find optimal batch size
+		for i := 0; i < 8 && high > low+100; i++ {
+			testSize := (low + high) / 2
+			if testSize <= 0 {
+				break
+			}
+
+			// Skip if batch size is too small
+			if testSize < 1000 {
+				high = testSize
+				continue
+			}
+
+			// Estimate size for this batch
+			estimatedSize, err := sw.writer.EstimateBlockSize(
+				sw.pendingIDs[:testSize],
+				sw.pendingValues[:testSize])
+
+			if err != nil {
+				high = testSize
+				continue
+			}
+
+			efficiency := float64(estimatedSize) / float64(sw.targetBlockSize)
+
+			// If efficiency is good (80-98%), this is a candidate
+			if efficiency >= 0.80 && efficiency <= 0.98 {
+				if efficiency > bestEfficiency {
+					bestBatchSize = testSize
+					bestEfficiency = efficiency
+				}
+			}
+
+			// Adjust search range
+			if float64(estimatedSize) > float64(sw.targetBlockSize)*0.98 {
+				high = testSize
+			} else {
+				low = testSize
+			}
 		}
 
-		// Ensure batch size is not larger than the pending items
+		// If we found a good batch size, use it
+		if bestBatchSize > 0 {
+			batchSize = bestBatchSize
+		} else if float64(batchSize) < float64(len(sw.pendingIDs))*0.5 {
+			// Ensure we're writing at least half of the pending items
+			batchSize = len(sw.pendingIDs) / 2
+		}
+
+		// Ensure batch size is not larger than pending items
 		if batchSize > len(sw.pendingIDs) {
 			batchSize = len(sw.pendingIDs)
 		}
 
-		// Keep track of the minimum batch size we've tried
-		minBatchSize := batchSize
+		// Ensure a minimum batch size
+		if batchSize < 1000 && len(sw.pendingIDs) > 1000 {
+			batchSize = 1000
+		}
 
-		for len(sw.pendingIDs) > 0 {
-			// Adjust batch size if we have fewer items than the batch size
-			if batchSize > len(sw.pendingIDs) {
-				batchSize = len(sw.pendingIDs)
+		// Try to write the optimized batch
+		err = sw.writer.WriteBlock(sw.pendingIDs[:batchSize], sw.pendingValues[:batchSize])
+
+		if err == nil {
+			// Batch was written successfully
+			sw.totalItems += uint64(batchSize)
+			sw.pendingIDs = sw.pendingIDs[batchSize:]
+			sw.pendingValues = sw.pendingValues[batchSize:]
+
+			// If we have more items, recursively try to flush again
+			if len(sw.pendingIDs) > 0 {
+				return sw.flushIfNeededWithDepth(force, depth+1)
 			}
+			return nil
+		} else if blockFullErr, ok := err.(*BlockFullError); ok {
+			// Block was full; if some items were written, update state
+			if blockFullErr.ItemsWritten > 0 {
+				sw.totalItems += uint64(blockFullErr.ItemsWritten)
+				sw.pendingIDs = sw.pendingIDs[blockFullErr.ItemsWritten:]
+				sw.pendingValues = sw.pendingValues[blockFullErr.ItemsWritten:]
 
-			// Try to write a batch
-			err := sw.writer.WriteBlock(sw.pendingIDs[:batchSize], sw.pendingValues[:batchSize])
-
-			if err == nil {
-				// Batch was written successfully
-				sw.totalItems += uint64(batchSize)
-				sw.pendingIDs = sw.pendingIDs[batchSize:]
-				sw.pendingValues = sw.pendingValues[batchSize:]
-
-				// If we've written all items, we're done
-				if len(sw.pendingIDs) == 0 {
-					break
-				}
-
-				// Try a larger batch size for the next iteration if this one succeeded
-				batchSize = int(float64(batchSize) * 1.5)
-				if batchSize > len(sw.pendingIDs) {
-					batchSize = len(sw.pendingIDs)
-				}
-			} else if blockFullErr, ok := err.(*BlockFullError); ok {
-				// Block was full, reduce batch size
-				if blockFullErr.ItemsWritten > 0 {
-					// Some items were written, update our state
-					sw.totalItems += uint64(blockFullErr.ItemsWritten)
-					sw.pendingIDs = sw.pendingIDs[blockFullErr.ItemsWritten:]
-					sw.pendingValues = sw.pendingValues[blockFullErr.ItemsWritten:]
-				} else {
-					// No items were written, reduce batch size and try again
-					batchSize = batchSize / 2
-
-					// If we've tried a very small batch size and it still doesn't work,
-					// there might be an issue with the data or the writer
-					if batchSize < 100 {
-						// Try with an absolute minimum batch size of 1
-						if minBatchSize <= 1 {
-							// If we've already tried with batch size 1 and it still doesn't work,
-							// there's a serious issue
-							return fmt.Errorf("failed to write even a single item")
-						}
-
-						// Try with a single item
-						batchSize = 1
-						minBatchSize = 1
-					}
-				}
+				// Recursively try again with remaining items
+				return sw.flushIfNeededWithDepth(force, depth+1)
 			} else {
-				// Some other error occurred
-				return fmt.Errorf("failed to write block: %w", err)
+				// No items were written, try with an absolute minimum batch size
+				if len(sw.pendingIDs) > 1 {
+					// Try with just one item
+					err = sw.writer.WriteBlock(sw.pendingIDs[:1], sw.pendingValues[:1])
+					if err == nil {
+						sw.totalItems += 1
+						sw.pendingIDs = sw.pendingIDs[1:]
+						sw.pendingValues = sw.pendingValues[1:]
+
+						// Continue with remaining items
+						return sw.flushIfNeededWithDepth(force, depth+1)
+					}
+
+					// If we can't even write a single item, something is wrong
+					return fmt.Errorf("failed to write even a single item: %w", err)
+				}
 			}
+		} else {
+			// Some other error occurred
+			return fmt.Errorf("failed to write block: %w", err)
 		}
 	}
 

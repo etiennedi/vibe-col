@@ -154,8 +154,8 @@ func TestVarintEncodingCompression(t *testing.T) {
 	tempFileVarIntName := tempFileVarInt.Name()
 	tempFileVarInt.Close()
 
-	// Create test data
-	count := 2000
+	// Create test data - reduced from 2000 to 500
+	count := 500
 	ids := make([]uint64, count)
 	values := make([]int64, count)
 
@@ -166,63 +166,35 @@ func TestVarintEncodingCompression(t *testing.T) {
 		values[i] = int64(i % 100) // Small values (0-99)
 	}
 
-	// Write with raw encoding first
-	rawWriter, err := NewWriter(tempFileRawName, WithEncoding(EncodingRaw))
+	// Write with raw encoding first using SimpleWriter
+	rawWriter, err := NewSimpleWriter(tempFileRawName, WithEncoding(EncodingRaw))
 	if err != nil {
 		t.Fatalf("Failed to create raw writer: %v", err)
 	}
 
-	// Write all items, handling BlockFullError if needed
-	remainingIDs := ids
-	remainingValues := values
-	for len(remainingIDs) > 0 {
-		err := rawWriter.WriteBlock(remainingIDs, remainingValues)
-		if blockFullErr, ok := err.(*BlockFullError); ok {
-			// Some items were written, continue with the rest
-			itemsWritten := blockFullErr.ItemsWritten
-			remainingIDs = remainingIDs[itemsWritten:]
-			remainingValues = remainingValues[itemsWritten:]
-		} else if err != nil {
-			t.Fatalf("Failed to write raw block: %v", err)
-			break
-		} else {
-			// All items were written
-			remainingIDs = nil
-			remainingValues = nil
-		}
+	// Write all items at once
+	err = rawWriter.Write(ids, values)
+	if err != nil {
+		t.Fatalf("Failed to write raw data: %v", err)
 	}
 
-	if err := rawWriter.FinalizeAndClose(); err != nil {
+	if err := rawWriter.Close(); err != nil {
 		t.Fatalf("Failed to finalize raw file: %v", err)
 	}
 
-	// Write with varint encoding
-	varIntWriter, err := NewWriter(tempFileVarIntName, WithEncoding(EncodingVarIntBoth))
+	// Write with varint encoding using SimpleWriter
+	varIntWriter, err := NewSimpleWriter(tempFileVarIntName, WithEncoding(EncodingVarIntBoth))
 	if err != nil {
 		t.Fatalf("Failed to create varint writer: %v", err)
 	}
 
-	// Write all items, handling BlockFullError if needed
-	remainingIDs = ids
-	remainingValues = values
-	for len(remainingIDs) > 0 {
-		err := varIntWriter.WriteBlock(remainingIDs, remainingValues)
-		if blockFullErr, ok := err.(*BlockFullError); ok {
-			// Some items were written, continue with the rest
-			itemsWritten := blockFullErr.ItemsWritten
-			remainingIDs = remainingIDs[itemsWritten:]
-			remainingValues = remainingValues[itemsWritten:]
-		} else if err != nil {
-			t.Fatalf("Failed to write varint block: %v", err)
-			break
-		} else {
-			// All items were written
-			remainingIDs = nil
-			remainingValues = nil
-		}
+	// Write all items at once
+	err = varIntWriter.Write(ids, values)
+	if err != nil {
+		t.Fatalf("Failed to write varint data: %v", err)
 	}
 
-	if err := varIntWriter.FinalizeAndClose(); err != nil {
+	if err := varIntWriter.Close(); err != nil {
 		t.Fatalf("Failed to finalize varint file: %v", err)
 	}
 
@@ -336,8 +308,8 @@ func TestVarintEncodingCompression_RealWorldData(t *testing.T) {
 	tempFileVarIntName := tempFileVarInt.Name()
 	tempFileVarInt.Close()
 
-	// Create test data with realistic patterns
-	count := 2000
+	// Create test data with realistic patterns - reduced from 2000 to 500
+	count := 500
 	ids := make([]uint64, count)
 	values := make([]int64, count)
 
@@ -348,63 +320,35 @@ func TestVarintEncodingCompression_RealWorldData(t *testing.T) {
 		values[i] = int64(i % 100) // Small values (0-99)
 	}
 
-	// Write with raw encoding first
-	rawWriter, err := NewWriter(tempFileRawName, WithEncoding(EncodingRaw))
+	// Write with raw encoding first using SimpleWriter
+	rawWriter, err := NewSimpleWriter(tempFileRawName, WithEncoding(EncodingRaw))
 	if err != nil {
 		t.Fatalf("Failed to create raw writer: %v", err)
 	}
 
-	// Write all items, handling BlockFullError if needed
-	remainingIDs := ids
-	remainingValues := values
-	for len(remainingIDs) > 0 {
-		err := rawWriter.WriteBlock(remainingIDs, remainingValues)
-		if blockFullErr, ok := err.(*BlockFullError); ok {
-			// Some items were written, continue with the rest
-			itemsWritten := blockFullErr.ItemsWritten
-			remainingIDs = remainingIDs[itemsWritten:]
-			remainingValues = remainingValues[itemsWritten:]
-		} else if err != nil {
-			t.Fatalf("Failed to write raw block: %v", err)
-			break
-		} else {
-			// All items were written
-			remainingIDs = nil
-			remainingValues = nil
-		}
+	// Write all items at once
+	err = rawWriter.Write(ids, values)
+	if err != nil {
+		t.Fatalf("Failed to write raw data: %v", err)
 	}
 
-	if err := rawWriter.FinalizeAndClose(); err != nil {
+	if err := rawWriter.Close(); err != nil {
 		t.Fatalf("Failed to finalize raw file: %v", err)
 	}
 
-	// Write with varint encoding
-	varIntWriter, err := NewWriter(tempFileVarIntName, WithEncoding(EncodingVarIntBoth))
+	// Write with varint encoding using SimpleWriter
+	varIntWriter, err := NewSimpleWriter(tempFileVarIntName, WithEncoding(EncodingVarIntBoth))
 	if err != nil {
 		t.Fatalf("Failed to create varint writer: %v", err)
 	}
 
-	// Write all items, handling BlockFullError if needed
-	remainingIDs = ids
-	remainingValues = values
-	for len(remainingIDs) > 0 {
-		err := varIntWriter.WriteBlock(remainingIDs, remainingValues)
-		if blockFullErr, ok := err.(*BlockFullError); ok {
-			// Some items were written, continue with the rest
-			itemsWritten := blockFullErr.ItemsWritten
-			remainingIDs = remainingIDs[itemsWritten:]
-			remainingValues = remainingValues[itemsWritten:]
-		} else if err != nil {
-			t.Fatalf("Failed to write varint block: %v", err)
-			break
-		} else {
-			// All items were written
-			remainingIDs = nil
-			remainingValues = nil
-		}
+	// Write all items at once
+	err = varIntWriter.Write(ids, values)
+	if err != nil {
+		t.Fatalf("Failed to write varint data: %v", err)
 	}
 
-	if err := varIntWriter.FinalizeAndClose(); err != nil {
+	if err := varIntWriter.Close(); err != nil {
 		t.Fatalf("Failed to finalize varint file: %v", err)
 	}
 

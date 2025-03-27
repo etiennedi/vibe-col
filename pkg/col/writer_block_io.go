@@ -15,9 +15,85 @@ func (e *BlockFullError) Error() string {
 	return fmt.Sprintf("block full after writing %d items", e.ItemsWritten)
 }
 
-// WriteBlock writes a block of ID-value pairs
-// If the block would exceed the target size, it writes as many items as possible
-// and returns a BlockFullError with information about how many items were written
+// BlockData encapsulates all the data needed to write a block to disk
+type BlockData struct {
+	// Raw data
+	IDs    []uint64
+	Values []int64
+
+	// Block metadata
+	MinID    uint64
+	MaxID    uint64
+	MinValue int64
+	MaxValue int64
+	Sum      int64
+	Count    uint32
+
+	// Encoded data
+	EncodedIDs        []uint64
+	EncodedValues     []int64
+	EncodedIDBytes    [][]byte
+	EncodedValueBytes [][]byte
+
+	// Section sizes
+	IDSectionSize    uint32
+	ValueSectionSize uint32
+
+	// Total expected size of the block (excluding padding)
+	ExpectedSize uint64
+}
+
+// PrepareBlockData encodes data and calculates metadata for writing a block
+func (w *Writer) PrepareBlockData(ids []uint64, values []int64) (*BlockData, error) {
+	if len(ids) != len(values) {
+		return nil, fmt.Errorf("ids and values must have the same length")
+	}
+
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("cannot prepare empty block")
+	}
+
+	// Calculate statistics from original values
+	minID, maxID := calculateMinMaxUint64(ids)
+	minValue, maxValue := calculateMinMaxInt64(values)
+	sum := calculateSumInt64(values)
+	count := uint32(len(ids))
+
+	// Encode IDs and values
+	encodedIDs, encodedIDBytes, idSectionSize, err := w.encodeIDs(ids)
+	if err != nil {
+		return nil, err
+	}
+
+	encodedValues, encodedValueBytes, valueSectionSize, err := w.encodeValues(values)
+	if err != nil {
+		return nil, err
+	}
+
+	// Calculate expected block size
+	expectedSize := uint64(blockHeaderSize + blockLayoutSize + idSectionSize + valueSectionSize)
+
+	// Create and return BlockData
+	return &BlockData{
+		IDs:               ids,
+		Values:            values,
+		MinID:             minID,
+		MaxID:             maxID,
+		MinValue:          minValue,
+		MaxValue:          maxValue,
+		Sum:               sum,
+		Count:             count,
+		EncodedIDs:        encodedIDs,
+		EncodedValues:     encodedValues,
+		EncodedIDBytes:    encodedIDBytes,
+		EncodedValueBytes: encodedValueBytes,
+		IDSectionSize:     idSectionSize,
+		ValueSectionSize:  valueSectionSize,
+		ExpectedSize:      expectedSize,
+	}, nil
+}
+
+// Modified WriteBlock function to use the new approach
 func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	if len(ids) != len(values) {
 		return fmt.Errorf("ids and values must have the same length")
@@ -33,8 +109,24 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 		return fmt.Errorf("failed to get current position: %w", err)
 	}
 
-	// Write the block directly without estimation
-	err = w.writeBlockInternal(ids, values)
+	// Prepare the block data with all encoding done
+	blockData, err := w.PrepareBlockData(ids, values)
+	if err != nil {
+		return err
+	}
+
+	// Check if this block would exceed the target size
+	if blockData.ExpectedSize > uint64(w.blockSizeTarget) {
+		return &BlockFullError{ItemsWritten: 0}
+	}
+
+	// Add all IDs to the global ID bitmap
+	for _, id := range ids {
+		w.globalIDs.Set(id)
+	}
+
+	// Write the block to disk
+	err = w.writeBlockInternal(blockData)
 
 	// If we successfully wrote the block, we're done
 	if err == nil {
@@ -70,48 +162,8 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	return &BlockFullError{ItemsWritten: 0}
 }
 
-// writeBlockInternal is the actual implementation of WriteBlock
-// It writes the block without checking the target size
-func (w *Writer) writeBlockInternal(ids []uint64, values []int64) error {
-	// Add all IDs to the global ID bitmap
-	for _, id := range ids {
-		w.globalIDs.Set(id)
-	}
-
-	// Determine if we need to use variable-length encoding
-	useVarIntForIDs := w.encodingType == EncodingVarInt ||
-		w.encodingType == EncodingVarIntID ||
-		w.encodingType == EncodingVarIntBoth
-	useVarIntForValues := w.encodingType == EncodingVarInt ||
-		w.encodingType == EncodingVarIntValue ||
-		w.encodingType == EncodingVarIntBoth
-
-	// Encode IDs and values
-	encodedIDs, encodedIdBytes, idSectionSize, err := w.encodeIDs(ids)
-	if err != nil {
-		return err
-	}
-
-	encodedValues, encodedValueBytes, valueSectionSize, err := w.encodeValues(values)
-	if err != nil {
-		return err
-	}
-
-	// Calculate statistics for the block using ORIGINAL values, not encoded values
-	// This ensures that aggregations are correct regardless of encoding
-	minID, maxID := calculateMinMaxUint64(ids)
-	minValue, maxValue := calculateMinMaxInt64(values)
-	sum := calculateSumInt64(values)
-	count := uint32(len(ids))
-
-	// Calculate the expected block size before writing anything
-	expectedSize := uint64(blockHeaderSize + blockLayoutSize + idSectionSize + valueSectionSize)
-
-	// Check if this block would exceed the target size
-	if expectedSize > uint64(w.blockSizeTarget) {
-		return &BlockFullError{ItemsWritten: 0}
-	}
-
+// Refactored writeBlockInternal to be agnostic of encoding
+func (w *Writer) writeBlockInternal(blockData *BlockData) error {
 	// Write block header (64 bytes)
 	blockStart, err := w.file.Seek(0, io.SeekCurrent)
 	if err != nil {
@@ -122,13 +174,13 @@ func (w *Writer) writeBlockInternal(ids []uint64, values []int64) error {
 	w.blockPositions = append(w.blockPositions, uint64(blockStart))
 
 	// Convert int64 values to uint64 for storage
-	minValueU64 := int64ToUint64(minValue)
-	maxValueU64 := int64ToUint64(maxValue)
-	sumU64 := int64ToUint64(sum)
+	minValueU64 := int64ToUint64(blockData.MinValue)
+	maxValueU64 := int64ToUint64(blockData.MaxValue)
+	sumU64 := int64ToUint64(blockData.Sum)
 
 	headerWritten := int64(0)
 	// Write block header
-	if n, err := w.writeBlockHeader(minID, maxID, minValueU64, maxValueU64, sumU64, count); err != nil {
+	if n, err := w.writeBlockHeader(blockData.MinID, blockData.MaxID, minValueU64, maxValueU64, sumU64, blockData.Count); err != nil {
 		return err
 	} else {
 		headerWritten = n
@@ -136,7 +188,6 @@ func (w *Writer) writeBlockInternal(ids []uint64, values []int64) error {
 
 	// Total data size (ID section + value section) helps with debugging
 	// but isn't needed for the file format
-
 	uncompressedSize := int32(0)       // Not implemented yet
 	compressedSize := uncompressedSize // Same as uncompressed for now
 
@@ -178,14 +229,14 @@ func (w *Writer) writeBlockInternal(ids []uint64, values []int64) error {
 	// 4. Value section size in bytes
 
 	// Validate section sizes
-	if idSectionSize == 0 {
-		return fmt.Errorf("ID section size is 0, which is invalid. useVarIntForIDs=%v, count=%d",
-			useVarIntForIDs, count)
+	if blockData.IDSectionSize == 0 {
+		return fmt.Errorf("ID section size is 0, which is invalid. count=%d",
+			blockData.Count)
 	}
 
-	if valueSectionSize == 0 {
-		return fmt.Errorf("Value section size is 0, which is invalid. useVarIntForValues=%v, count=%d",
-			useVarIntForValues, count)
+	if blockData.ValueSectionSize == 0 {
+		return fmt.Errorf("Value section size is 0, which is invalid. count=%d",
+			blockData.Count)
 	}
 
 	// Per spec section 4.2:
@@ -193,14 +244,14 @@ func (w *Writer) writeBlockInternal(ids []uint64, values []int64) error {
 	// - Value section follows the ID section
 	// The offsets are relative to the end of the block header (after the 16-byte layout section)
 	idSectionOffset := uint32(0)
-	valueSectionOffset := idSectionSize
+	valueSectionOffset := blockData.IDSectionSize
 
 	// Create a layout buffer and fill it
 	layoutBuf := make([]byte, 16)
 	binary.LittleEndian.PutUint32(layoutBuf[0:4], idSectionOffset)
-	binary.LittleEndian.PutUint32(layoutBuf[4:8], idSectionSize)
+	binary.LittleEndian.PutUint32(layoutBuf[4:8], blockData.IDSectionSize)
 	binary.LittleEndian.PutUint32(layoutBuf[8:12], valueSectionOffset)
-	binary.LittleEndian.PutUint32(layoutBuf[12:16], valueSectionSize)
+	binary.LittleEndian.PutUint32(layoutBuf[12:16], blockData.ValueSectionSize)
 
 	// Write the layout buffer to file
 	bytesWritten, err := w.file.Write(layoutBuf)
@@ -219,62 +270,28 @@ func (w *Writer) writeBlockInternal(ids []uint64, values []int64) error {
 	}
 	_ = dataSectionStart // Unused for now
 
-	// Write ID array based on encoding type
-	var actualIdSectionSize int64 = 0
-
-	if useVarIntForIDs {
-		// Use variable-length encoding for IDs (using precomputed values)
-		for i := range encodedIDs {
-			// Write the precomputed varint bytes for this ID
-			written, err := w.file.Write(encodedIdBytes[i])
-			if err != nil {
-				return fmt.Errorf("failed to write varint ID: %w", err)
-			}
-			actualIdSectionSize += int64(written)
-		}
-	} else {
-		// Write fixed-length IDs
-		for _, id := range encodedIDs {
-			if err := binary.Write(w.file, binary.LittleEndian, id); err != nil {
-				return fmt.Errorf("failed to write ID: %w", err)
-			}
-			actualIdSectionSize += 8
-		}
+	// Write ID section
+	actualIdSectionSize, err := w.writeSection(blockData.EncodedIDs, blockData.EncodedIDBytes, w.hasVarIntIDs())
+	if err != nil {
+		return err
 	}
 
 	// Verify ID section size
-	if uint32(actualIdSectionSize) != idSectionSize {
+	if uint32(actualIdSectionSize) != blockData.IDSectionSize {
 		return fmt.Errorf("ID section size mismatch: expected=%d, actual=%d",
-			idSectionSize, actualIdSectionSize)
+			blockData.IDSectionSize, actualIdSectionSize)
 	}
 
-	// Write Value array based on encoding type
-	var actualValueSectionSize int64 = 0
-
-	if useVarIntForValues {
-		// Use variable-length encoding for values (using precomputed values)
-		for i := range encodedValues {
-			// Write the precomputed varint bytes for this value
-			written, err := w.file.Write(encodedValueBytes[i])
-			if err != nil {
-				return fmt.Errorf("failed to write varint value: %w", err)
-			}
-			actualValueSectionSize += int64(written)
-		}
-	} else {
-		// Write fixed-length values
-		for _, val := range encodedValues {
-			if err := binary.Write(w.file, binary.LittleEndian, val); err != nil {
-				return fmt.Errorf("failed to write value: %w", err)
-			}
-			actualValueSectionSize += 8
-		}
+	// Write Value section
+	actualValueSectionSize, err := w.writeSection(blockData.EncodedValues, blockData.EncodedValueBytes, w.hasVarIntValues())
+	if err != nil {
+		return err
 	}
 
 	// Verify value section size
-	if uint32(actualValueSectionSize) != valueSectionSize {
+	if uint32(actualValueSectionSize) != blockData.ValueSectionSize {
 		return fmt.Errorf("value section size mismatch: expected=%d, actual=%d",
-			valueSectionSize, actualValueSectionSize)
+			blockData.ValueSectionSize, actualValueSectionSize)
 	}
 
 	// Get end position to calculate block size
@@ -304,7 +321,7 @@ func (w *Writer) writeBlockInternal(ids []uint64, values []int64) error {
 	}
 
 	// Verify block size calculation (only for the actual data, excluding padding)
-	expectedBlockSize := blockHeaderSize + blockLayoutSize + uint64(idSectionSize) + uint64(valueSectionSize)
+	expectedBlockSize := blockHeaderSize + blockLayoutSize + uint64(blockData.IDSectionSize) + uint64(blockData.ValueSectionSize)
 	blockSizeDifference := (blockSize - uint64(padding)) - expectedBlockSize
 	if blockSizeDifference != 0 {
 		return fmt.Errorf("block size mismatch: expected=%d, actual=%d, diff=%d",
@@ -315,12 +332,12 @@ func (w *Writer) writeBlockInternal(ids []uint64, values []int64) error {
 
 	// Store block statistics for footer
 	w.blockStats = append(w.blockStats, BlockStats{
-		MinID:    minID,
-		MaxID:    maxID,
-		MinValue: minValue,
-		MaxValue: maxValue,
-		Sum:      sum,
-		Count:    count,
+		MinID:    blockData.MinID,
+		MaxID:    blockData.MaxID,
+		MinValue: blockData.MinValue,
+		MaxValue: blockData.MaxValue,
+		Sum:      blockData.Sum,
+		Count:    blockData.Count,
 	})
 
 	// Increment block count
@@ -334,43 +351,77 @@ func (w *Writer) writeBlockInternal(ids []uint64, values []int64) error {
 	return nil
 }
 
+// writeSection writes either fixed or variable length data to the file
+func (w *Writer) writeSection(encodedData interface{}, encodedBytes [][]byte, useVarInt bool) (int64, error) {
+	var sectionSize int64 = 0
+
+	if useVarInt {
+		// Write variable-length encoded data
+		for i := range encodedBytes {
+			written, err := w.file.Write(encodedBytes[i])
+			if err != nil {
+				return 0, fmt.Errorf("failed to write varint data: %w", err)
+			}
+			sectionSize += int64(written)
+		}
+	} else {
+		// Write fixed-length data
+		switch data := encodedData.(type) {
+		case []uint64:
+			for _, val := range data {
+				if err := binary.Write(w.file, binary.LittleEndian, val); err != nil {
+					return 0, fmt.Errorf("failed to write uint64: %w", err)
+				}
+				sectionSize += 8
+			}
+		case []int64:
+			for _, val := range data {
+				if err := binary.Write(w.file, binary.LittleEndian, val); err != nil {
+					return 0, fmt.Errorf("failed to write int64: %w", err)
+				}
+				sectionSize += 8
+			}
+		default:
+			return 0, fmt.Errorf("unsupported data type")
+		}
+	}
+
+	return sectionSize, nil
+}
+
+// hasVarIntIDs returns true if the encoding type uses variable-length encoding for IDs
+func (w *Writer) hasVarIntIDs() bool {
+	return w.encodingType == EncodingVarInt ||
+		w.encodingType == EncodingVarIntID ||
+		w.encodingType == EncodingVarIntBoth
+}
+
+// hasVarIntValues returns true if the encoding type uses variable-length encoding for values
+func (w *Writer) hasVarIntValues() bool {
+	return w.encodingType == EncodingVarInt ||
+		w.encodingType == EncodingVarIntValue ||
+		w.encodingType == EncodingVarIntBoth
+}
+
 // EstimateBlockSize calculates the exact size a block would be without writing it
 // This is useful for determining if a block would fit within a target size
 func (w *Writer) EstimateBlockSize(ids []uint64, values []int64) (uint64, error) {
-	if len(ids) != len(values) {
-		return 0, fmt.Errorf("ids and values must have the same length")
-	}
-
-	if len(ids) == 0 {
-		return 0, fmt.Errorf("cannot estimate empty block")
-	}
-
-	// Encode IDs and values to get exact sizes
-	_, _, idSectionSize, err := w.encodeIDs(ids)
+	blockData, err := w.PrepareBlockData(ids, values)
 	if err != nil {
 		return 0, err
 	}
 
-	_, _, valueSectionSize, err := w.encodeValues(values)
-	if err != nil {
-		return 0, err
-	}
-
-	// Calculate total block size
-	// Block header + block layout + ID section + value section
-	totalSize := uint64(blockHeaderSize + blockLayoutSize + idSectionSize + valueSectionSize)
-
-	// Add padding size if needed for page alignment
+	// Calculate where the block would end
 	currentPos, err := w.file.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get current position: %w", err)
 	}
 
-	// Calculate where the block would end
-	blockEnd := currentPos + int64(totalSize)
+	blockEnd := currentPos + int64(blockData.ExpectedSize)
 
 	// Add padding if needed
 	padding := calculatePadding(blockEnd, PageSize)
+	totalSize := blockData.ExpectedSize
 	if padding > 0 {
 		totalSize += uint64(padding)
 	}

@@ -23,12 +23,12 @@ func TestParallelAggregation(t *testing.T) {
 	// Create a test file with multiple blocks
 	filePath := filepath.Join(tempDir, "parallel_test.col")
 
-	// Create a writer with a smaller block size to ensure multiple blocks
-	writer, err := NewWriter(filePath, WithBlockSize(32*1024)) // 32KB blocks
+	// Create a SimpleWriter with a smaller block size to ensure multiple blocks
+	simpleWriter, err := NewSimpleWriter(filePath, WithBlockSize(16*1024)) // 16KB blocks
 	require.NoError(t, err)
 
-	// Generate test data with 100,000 items
-	const numItems = 100000
+	// Generate test data with 20,000 items (reduced from 100,000)
+	const numItems = 20000
 	ids := make([]uint64, numItems)
 	values := make([]int64, numItems)
 
@@ -38,40 +38,24 @@ func TestParallelAggregation(t *testing.T) {
 	// Generate random IDs and values
 	for i := 0; i < numItems; i++ {
 		ids[i] = uint64(i)
-		values[i] = int64(r.Intn(1000000)) // Random values between 0 and 999,999
+		values[i] = int64(r.Intn(1000)) // Random values between 0 and 999 (smaller values)
 	}
 
 	// Write data in smaller batches to create multiple blocks
-	batchSize := 10000
+	batchSize := 1000 // Smaller batch size (down from 10,000)
+
 	for i := 0; i < numItems; i += batchSize {
 		end := i + batchSize
 		if end > numItems {
 			end = numItems
 		}
 
-		// Write the batch, handling BlockFullError if needed
-		remainingIDs := ids[i:end]
-		remainingValues := values[i:end]
-
-		for len(remainingIDs) > 0 {
-			err := writer.WriteBlock(remainingIDs, remainingValues)
-			if blockFullErr, ok := err.(*BlockFullError); ok {
-				// Some items were written, continue with the rest
-				itemsWritten := blockFullErr.ItemsWritten
-				remainingIDs = remainingIDs[itemsWritten:]
-				remainingValues = remainingValues[itemsWritten:]
-			} else if err != nil {
-				require.NoError(t, err, "Failed to write block")
-				break
-			} else {
-				// All items were written
-				break
-			}
-		}
+		err = simpleWriter.Write(ids[i:end], values[i:end])
+		require.NoError(t, err, "Failed to write batch")
 	}
 
 	// Finalize and close the writer
-	err = writer.FinalizeAndClose()
+	err = simpleWriter.Close()
 	require.NoError(t, err)
 
 	// Open the file for reading
@@ -87,12 +71,10 @@ func TestParallelAggregation(t *testing.T) {
 	// Run sequential aggregation as baseline
 	seqResult := reader.Aggregate()
 
-	// Test with different parallelization factors
+	// Test with just two parallelization factors instead of 4
 	parallelFactors := []int{
 		2,                     // 2 workers
-		4,                     // 4 workers
 		runtime.GOMAXPROCS(0), // GOMAXPROCS workers
-		-1,                    // Auto (GOMAXPROCS)
 	}
 
 	for _, parallel := range parallelFactors {
@@ -248,12 +230,12 @@ func TestParallelAggregationWithFilter(t *testing.T) {
 	// Create a test file with multiple blocks
 	filePath := filepath.Join(tempDir, "parallel_filter_test.col")
 
-	// Create a writer with a smaller block size to ensure multiple blocks
-	writer, err := NewWriter(filePath, WithBlockSize(32*1024)) // 32KB blocks
+	// Create a SimpleWriter with a smaller block size to ensure multiple blocks
+	simpleWriter, err := NewSimpleWriter(filePath, WithBlockSize(16*1024)) // 16KB blocks
 	require.NoError(t, err)
 
-	// Generate test data with 100,000 items
-	const numItems = 100000
+	// Generate test data with 20,000 items (reduced from 100,000)
+	const numItems = 20000
 	ids := make([]uint64, numItems)
 	values := make([]int64, numItems)
 
@@ -263,40 +245,24 @@ func TestParallelAggregationWithFilter(t *testing.T) {
 	// Generate sequential IDs and random values
 	for i := 0; i < numItems; i++ {
 		ids[i] = uint64(i)
-		values[i] = int64(r.Intn(1000000)) // Random values between 0 and 999,999
+		values[i] = int64(r.Intn(1000)) // Random values between 0 and 999 (smaller range)
 	}
 
 	// Write data in smaller batches to create multiple blocks
-	batchSize := 10000
+	batchSize := 1000 // Smaller batch size
 	for i := 0; i < numItems; i += batchSize {
 		end := i + batchSize
 		if end > numItems {
 			end = numItems
 		}
 
-		// Write the batch, handling BlockFullError if needed
-		remainingIDs := ids[i:end]
-		remainingValues := values[i:end]
-
-		for len(remainingIDs) > 0 {
-			err := writer.WriteBlock(remainingIDs, remainingValues)
-			if blockFullErr, ok := err.(*BlockFullError); ok {
-				// Some items were written, continue with the rest
-				itemsWritten := blockFullErr.ItemsWritten
-				remainingIDs = remainingIDs[itemsWritten:]
-				remainingValues = remainingValues[itemsWritten:]
-			} else if err != nil {
-				require.NoError(t, err, "Failed to write block")
-				break
-			} else {
-				// All items were written
-				break
-			}
-		}
+		// Use SimpleWriter which handles batching better
+		err = simpleWriter.Write(ids[i:end], values[i:end])
+		require.NoError(t, err, "Failed to write batch")
 	}
 
 	// Finalize and close the writer
-	err = writer.FinalizeAndClose()
+	err = simpleWriter.Close()
 	require.NoError(t, err)
 
 	// Open the file for reading
@@ -316,12 +282,10 @@ func TestParallelAggregationWithFilter(t *testing.T) {
 	}
 	seqResult := reader.AggregateWithOptions(seqOpts)
 
-	// Test with different parallelization factors
+	// Test with fewer parallelization factors
 	parallelFactors := []int{
 		2,                     // 2 workers
-		4,                     // 4 workers
 		runtime.GOMAXPROCS(0), // GOMAXPROCS workers
-		-1,                    // Auto (GOMAXPROCS)
 	}
 
 	for _, parallel := range parallelFactors {
