@@ -29,15 +29,13 @@ type BlockData struct {
 	Sum      int64
 	Count    uint32
 
-	// Encoded data
-	EncodedIDs        []uint64
-	EncodedValues     []int64
-	EncodedIDBytes    [][]byte
-	EncodedValueBytes [][]byte
-
 	// Section sizes
 	IDSectionSize    uint32
 	ValueSectionSize uint32
+
+	// Serialized data ready to be written directly
+	SerializedIDSection    []byte
+	SerializedValueSection []byte
 
 	// Total expected size of the block (excluding padding)
 	ExpectedSize uint64
@@ -59,38 +57,175 @@ func (w *Writer) PrepareBlockData(ids []uint64, values []int64) (*BlockData, err
 	sum := calculateSumInt64(values)
 	count := uint32(len(ids))
 
-	// Encode IDs and values
-	encodedIDs, encodedIDBytes, idSectionSize, err := w.encodeIDs(ids)
+	// Serialize ID section based on encoding type
+	serializedIDSection, err := w.serializeIDSection(ids)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to serialize ID section: %w", err)
 	}
+	idSectionSize := uint32(len(serializedIDSection))
 
-	encodedValues, encodedValueBytes, valueSectionSize, err := w.encodeValues(values)
+	// Serialize value section based on encoding type
+	serializedValueSection, err := w.serializeValueSection(values)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to serialize value section: %w", err)
 	}
+	valueSectionSize := uint32(len(serializedValueSection))
 
 	// Calculate expected block size
 	expectedSize := uint64(blockHeaderSize + blockLayoutSize + idSectionSize + valueSectionSize)
 
 	// Create and return BlockData
 	return &BlockData{
-		IDs:               ids,
-		Values:            values,
-		MinID:             minID,
-		MaxID:             maxID,
-		MinValue:          minValue,
-		MaxValue:          maxValue,
-		Sum:               sum,
-		Count:             count,
-		EncodedIDs:        encodedIDs,
-		EncodedValues:     encodedValues,
-		EncodedIDBytes:    encodedIDBytes,
-		EncodedValueBytes: encodedValueBytes,
-		IDSectionSize:     idSectionSize,
-		ValueSectionSize:  valueSectionSize,
-		ExpectedSize:      expectedSize,
+		IDs:                    ids,
+		Values:                 values,
+		MinID:                  minID,
+		MaxID:                  maxID,
+		MinValue:               minValue,
+		MaxValue:               maxValue,
+		Sum:                    sum,
+		Count:                  count,
+		IDSectionSize:          idSectionSize,
+		ValueSectionSize:       valueSectionSize,
+		SerializedIDSection:    serializedIDSection,
+		SerializedValueSection: serializedValueSection,
+		ExpectedSize:           expectedSize,
 	}, nil
+}
+
+// serializeIDSection takes IDs and returns a byte slice ready to be written to disk
+func (w *Writer) serializeIDSection(ids []uint64) ([]byte, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("cannot serialize empty ID section")
+	}
+
+	// Apply delta encoding if needed
+	var encodedIds []uint64
+
+	if w.encodingType == EncodingDeltaID || w.encodingType == EncodingDeltaBoth {
+		// Apply delta encoding
+		encodedIds = deltaEncode(ids)
+	} else {
+		// Use original IDs
+		encodedIds = make([]uint64, len(ids))
+		copy(encodedIds, ids)
+	}
+
+	// Then choose appropriate serialization format
+	if w.encodingType == EncodingVarInt || w.encodingType == EncodingVarIntID ||
+		w.encodingType == EncodingVarIntBoth {
+		// Use variable-length encoding
+		return w.serializeVarIntIDs(encodedIds)
+	} else {
+		// Use fixed-length encoding
+		return w.serializeFixedLengthIDs(encodedIds)
+	}
+}
+
+// serializeValueSection takes values and returns a byte slice ready to be written to disk
+func (w *Writer) serializeValueSection(values []int64) ([]byte, error) {
+	if len(values) == 0 {
+		return nil, fmt.Errorf("cannot serialize empty value section")
+	}
+
+	// Apply delta encoding if needed
+	var encodedValues []int64
+
+	if w.encodingType == EncodingDeltaValue || w.encodingType == EncodingDeltaBoth {
+		// Apply delta encoding
+		encodedValues = deltaEncodeInt64(values)
+	} else {
+		// Use original values
+		encodedValues = make([]int64, len(values))
+		copy(encodedValues, values)
+	}
+
+	// Then choose appropriate serialization format
+	if w.encodingType == EncodingVarInt || w.encodingType == EncodingVarIntValue ||
+		w.encodingType == EncodingVarIntBoth {
+		// Use variable-length encoding
+		return w.serializeVarIntValues(encodedValues)
+	} else {
+		// Use fixed-length encoding
+		return w.serializeFixedLengthValues(encodedValues)
+	}
+}
+
+// serializeVarIntIDs serializes IDs using variable-length encoding
+func (w *Writer) serializeVarIntIDs(ids []uint64) ([]byte, error) {
+	_, encodedIDBytes, _, err := w.encodeIDs(ids)
+	if err != nil {
+		return nil, err
+	}
+
+	// Pre-calculate total buffer size
+	totalSize := 0
+	for i := range encodedIDBytes {
+		totalSize += len(encodedIDBytes[i])
+	}
+
+	// Create a single buffer for all IDs
+	buffer := make([]byte, totalSize)
+	offset := 0
+
+	// Copy all encoded bytes into the buffer
+	for i := range encodedIDBytes {
+		copy(buffer[offset:], encodedIDBytes[i])
+		offset += len(encodedIDBytes[i])
+	}
+
+	return buffer, nil
+}
+
+// serializeFixedLengthIDs serializes IDs using fixed-length encoding
+func (w *Writer) serializeFixedLengthIDs(ids []uint64) ([]byte, error) {
+	// Pre-calculate buffer size: 8 bytes per ID
+	buffer := make([]byte, len(ids)*8)
+
+	// Write each ID into the buffer
+	for i, id := range ids {
+		binary.LittleEndian.PutUint64(buffer[i*8:], id)
+	}
+
+	return buffer, nil
+}
+
+// serializeVarIntValues serializes values using variable-length encoding
+func (w *Writer) serializeVarIntValues(values []int64) ([]byte, error) {
+	_, encodedValueBytes, _, err := w.encodeValues(values)
+	if err != nil {
+		return nil, err
+	}
+
+	// Pre-calculate total buffer size
+	totalSize := 0
+	for i := range encodedValueBytes {
+		totalSize += len(encodedValueBytes[i])
+	}
+
+	// Create a single buffer for all values
+	buffer := make([]byte, totalSize)
+	offset := 0
+
+	// Copy all encoded bytes into the buffer
+	for i := range encodedValueBytes {
+		copy(buffer[offset:], encodedValueBytes[i])
+		offset += len(encodedValueBytes[i])
+	}
+
+	return buffer, nil
+}
+
+// serializeFixedLengthValues serializes values using fixed-length encoding
+func (w *Writer) serializeFixedLengthValues(values []int64) ([]byte, error) {
+	// Pre-calculate buffer size: 8 bytes per value
+	buffer := make([]byte, len(values)*8)
+
+	// Write each value into the buffer
+	for i, value := range values {
+		binary.LittleEndian.PutUint64(buffer[i*8:], int64ToUint64(value))
+	}
+
+	return buffer, nil
 }
 
 // Modified WriteBlock function to use the new approach
@@ -162,7 +297,7 @@ func (w *Writer) WriteBlock(ids []uint64, values []int64) error {
 	return &BlockFullError{ItemsWritten: 0}
 }
 
-// Refactored writeBlockInternal to be agnostic of encoding
+// Refactored writeBlockInternal to be completely agnostic of encoding
 func (w *Writer) writeBlockInternal(blockData *BlockData) error {
 	// Write block header (64 bytes)
 	blockStart, err := w.file.Seek(0, io.SeekCurrent)
@@ -270,10 +405,10 @@ func (w *Writer) writeBlockInternal(blockData *BlockData) error {
 	}
 	_ = dataSectionStart // Unused for now
 
-	// Write ID section
-	actualIdSectionSize, err := w.writeSection(blockData.EncodedIDs, blockData.EncodedIDBytes, w.hasVarIntIDs())
+	// Write ID section directly from pre-serialized data
+	actualIdSectionSize, err := w.file.Write(blockData.SerializedIDSection)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to write ID section: %w", err)
 	}
 
 	// Verify ID section size
@@ -282,10 +417,10 @@ func (w *Writer) writeBlockInternal(blockData *BlockData) error {
 			blockData.IDSectionSize, actualIdSectionSize)
 	}
 
-	// Write Value section
-	actualValueSectionSize, err := w.writeSection(blockData.EncodedValues, blockData.EncodedValueBytes, w.hasVarIntValues())
+	// Write Value section directly from pre-serialized data
+	actualValueSectionSize, err := w.file.Write(blockData.SerializedValueSection)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to write value section: %w", err)
 	}
 
 	// Verify value section size
@@ -349,58 +484,6 @@ func (w *Writer) writeBlockInternal(blockData *BlockData) error {
 	}
 
 	return nil
-}
-
-// writeSection writes either fixed or variable length data to the file
-func (w *Writer) writeSection(encodedData interface{}, encodedBytes [][]byte, useVarInt bool) (int64, error) {
-	var sectionSize int64 = 0
-
-	if useVarInt {
-		// Write variable-length encoded data
-		for i := range encodedBytes {
-			written, err := w.file.Write(encodedBytes[i])
-			if err != nil {
-				return 0, fmt.Errorf("failed to write varint data: %w", err)
-			}
-			sectionSize += int64(written)
-		}
-	} else {
-		// Write fixed-length data
-		switch data := encodedData.(type) {
-		case []uint64:
-			for _, val := range data {
-				if err := binary.Write(w.file, binary.LittleEndian, val); err != nil {
-					return 0, fmt.Errorf("failed to write uint64: %w", err)
-				}
-				sectionSize += 8
-			}
-		case []int64:
-			for _, val := range data {
-				if err := binary.Write(w.file, binary.LittleEndian, val); err != nil {
-					return 0, fmt.Errorf("failed to write int64: %w", err)
-				}
-				sectionSize += 8
-			}
-		default:
-			return 0, fmt.Errorf("unsupported data type")
-		}
-	}
-
-	return sectionSize, nil
-}
-
-// hasVarIntIDs returns true if the encoding type uses variable-length encoding for IDs
-func (w *Writer) hasVarIntIDs() bool {
-	return w.encodingType == EncodingVarInt ||
-		w.encodingType == EncodingVarIntID ||
-		w.encodingType == EncodingVarIntBoth
-}
-
-// hasVarIntValues returns true if the encoding type uses variable-length encoding for values
-func (w *Writer) hasVarIntValues() bool {
-	return w.encodingType == EncodingVarInt ||
-		w.encodingType == EncodingVarIntValue ||
-		w.encodingType == EncodingVarIntBoth
 }
 
 // EstimateBlockSize calculates the exact size a block would be without writing it

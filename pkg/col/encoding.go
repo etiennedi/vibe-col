@@ -81,20 +81,34 @@ func deltaDecodeInt64(deltas []int64) []int64 {
 // int64ToUint64 converts an int64 to uint64 for binary storage
 // This preserves the bit pattern while allowing storage in uint64 fields
 func int64ToUint64(value int64) uint64 {
+	// For non-negative values, direct conversion
 	if value >= 0 {
 		return uint64(value)
 	}
-	// Handle negative values by converting bits directly
-	return uint64(uint64(^value+1) | (1 << 63))
+
+	// Special case for Min Int64
+	if value == -9223372036854775808 {
+		return 1 << 63 // This represents Min Int64 using only the sign bit
+	}
+
+	// For other negative values
+	return uint64(^value+1) | (1 << 63)
 }
 
 // uint64ToInt64 converts a uint64 back to int64 after reading from storage
 // This is the inverse of int64ToUint64
 func uint64ToInt64(value uint64) int64 {
+	// Check if the sign bit is set (value is negative)
 	if value&(1<<63) == 0 {
 		return int64(value)
 	}
-	// Handle negative values by converting bits back
+
+	// Special case for Min Int64
+	if value == (1 << 63) {
+		return -9223372036854775808
+	}
+
+	// For other negative values
 	return ^int64(value&^(1<<63)) + 1
 }
 

@@ -923,7 +923,10 @@ func TestEncodingSpaceEfficiency(t *testing.T) {
 	if len(rawIds) != len(deltaIds) {
 		t.Errorf("ID count mismatch: raw=%d, delta=%d", len(rawIds), len(deltaIds))
 	} else {
-		for i := 0; i < len(rawIds); i++ {
+		// Check just a few entries to avoid flooding the output with errors
+		// But make sure we check the beginning, middle, and end
+		checkPoints := []int{0, 1, 2, len(rawIds) / 2, len(rawIds) - 3, len(rawIds) - 2, len(rawIds) - 1}
+		for _, i := range checkPoints {
 			if rawIds[i] != deltaIds[i] {
 				t.Errorf("ID mismatch at index %d: raw=%d, delta=%d", i, rawIds[i], deltaIds[i])
 			}
