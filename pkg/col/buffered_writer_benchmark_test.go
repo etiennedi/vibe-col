@@ -2,120 +2,213 @@ package col
 
 import (
 	"encoding/binary"
+	"fmt"
 	"os"
-	"path/filepath"
 	"testing"
 )
 
+// BenchmarkBufferedWriter benchmarks the performance of the buffered writer
+// with different block sizes and batch operations.
 func BenchmarkBufferedWriter(b *testing.B) {
-	// Create temp directory for benchmarks
-	tempDir := b.TempDir()
+	// Define block sizes to benchmark
+	blockSizes := []int{4 * 1024, 8 * 1024, 16 * 1024, 32 * 1024, 64 * 1024} // 4KB to 64KB
 
-	// Generate test data with 1,000 ID-value pairs (smaller to avoid block limits)
-	numEntries := 1000
-	ids := make([]uint64, numEntries)
-	values := make([]int64, numEntries)
+	// Define batch sizes to test
+	batchSizes := []int{1, 10, 100, 1000}
 
-	for i := 0; i < numEntries; i++ {
-		ids[i] = uint64(i + 1)
-		values[i] = int64(i * 10)
+	// Create test data once
+	const maxEntries = 100000
+	var ids []uint64
+	var values []int64
+
+	for i := 0; i < maxEntries; i++ {
+		ids = append(ids, uint64(i+1))
+		values = append(values, int64(i*10))
 	}
 
-	// Use a large block size to accommodate all entries
-	blockSize := uint32(1024 * 1024) // 1MB
+	for _, blockSize := range blockSizes {
+		for _, batchSize := range batchSizes {
+			b.Run(
+				fmt.Sprintf("BlockSize_%dKB_Batch_%d", blockSize/1024, batchSize),
+				func(b *testing.B) {
+					// Limit the number of entries based on batch size to keep benchmark time reasonable
+					entriesPerRun := maxEntries
+					if batchSize == 1 && b.N > 1 {
+						entriesPerRun = 10000 // Reduce entries for single-add to avoid excessive benchmark time
+					}
 
-	b.Run("Add1K", func(b *testing.B) {
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						b.StopTimer()
+						// Create a temporary file
+						f, err := os.CreateTemp("", "bench-bufferedwriter-*.col")
+						if err != nil {
+							b.Fatalf("Failed to create temp file: %v", err)
+						}
+						tempFilePath := f.Name()
+						f.Close() // Close immediately as the writer will open it
+
+						// Create a buffered writer
+						bufferedWriter, err := NewBufferedWriter(tempFilePath, WithBufferedBlockSize(uint32(blockSize)))
+						if err != nil {
+							os.Remove(tempFilePath)
+							b.Fatalf("Failed to create buffered writer: %v", err)
+						}
+						b.StartTimer()
+
+						// With batch size 1, we're testing the normal Add() performance
+						if batchSize == 1 {
+							for j := 0; j < entriesPerRun; j++ {
+								if err := bufferedWriter.Add(ids[j], values[j]); err != nil {
+									b.Fatalf("Failed to add entry: %v", err)
+								}
+							}
+						} else {
+							// With larger batch sizes, use BatchAdd to add entries in batches
+							for j := 0; j < entriesPerRun; j += batchSize {
+								end := j + batchSize
+								if end > entriesPerRun {
+									end = entriesPerRun
+								}
+
+								// Use the new BatchAdd method
+								if err := bufferedWriter.BatchAdd(ids[j:end], values[j:end]); err != nil {
+									b.Fatalf("Failed to batch add entries: %v", err)
+								}
+							}
+						}
+
+						// Don't count closing time in the benchmark
+						b.StopTimer()
+						err = bufferedWriter.Close()
+						if err != nil {
+							os.Remove(tempFilePath)
+							b.Fatalf("Failed to close writer: %v", err)
+						}
+						os.Remove(tempFilePath)
+					}
+				},
+			)
+		}
+	}
+}
+
+// BenchmarkBufferedWriterVsStandard compares the performance of BufferedWriter with the standard Writer
+func BenchmarkBufferedWriterVsStandard(b *testing.B) {
+	// Create test data
+	const numEntries = 100000
+	var ids []uint64
+	var values []int64
+
+	for i := 0; i < numEntries; i++ {
+		ids = append(ids, uint64(i+1))
+		values = append(values, int64(i*10))
+	}
+
+	b.Run("StandardWriter", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			// Reset the timer while we set up
 			b.StopTimer()
-			filename := filepath.Join(tempDir, "buffered_add_benchmark.col")
-			writer, err := NewBufferedWriter(filename, WithBufferedBlockSize(blockSize))
+			// Create a temporary file
+			f, err := os.CreateTemp("", "bench-standard-*.col")
 			if err != nil {
-				b.Fatalf("Failed to create writer: %v", err)
+				b.Fatalf("Failed to create temp file: %v", err)
 			}
+			tempFilePath := f.Name()
+			f.Close() // Close immediately as the writer will open it
 
-			// Start timing
+			// Create a standard writer with a large block size to hold all entries
+			standardWriter, err := NewWriter(tempFilePath, WithBlockSize(2*1024*1024)) // 2MB block size
+			if err != nil {
+				os.Remove(tempFilePath)
+				b.Fatalf("Failed to create standard writer: %v", err)
+			}
 			b.StartTimer()
 
-			// Add all entries
+			// Write all entries at once (as that's how standard writer works)
+			err = standardWriter.WriteBlock(ids, values)
+			if err != nil {
+				b.Fatalf("Failed to write block: %v", err)
+			}
+
+			b.StopTimer()
+			err = standardWriter.FinalizeAndClose()
+			if err != nil {
+				os.Remove(tempFilePath)
+				b.Fatalf("Failed to close writer: %v", err)
+			}
+			os.Remove(tempFilePath)
+		}
+	})
+
+	b.Run("BufferedWriter_SingleAdd", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			b.StopTimer()
+			// Create a temporary file
+			f, err := os.CreateTemp("", "bench-buffered-*.col")
+			if err != nil {
+				b.Fatalf("Failed to create temp file: %v", err)
+			}
+			tempFilePath := f.Name()
+			f.Close() // Close immediately as the writer will open it
+
+			// Create a buffered writer with 16KB blocks
+			bufferedWriter, err := NewBufferedWriter(tempFilePath, WithBufferedBlockSize(16*1024))
+			if err != nil {
+				os.Remove(tempFilePath)
+				b.Fatalf("Failed to create buffered writer: %v", err)
+			}
+			b.StartTimer()
+
+			// Add each entry individually (the old inefficient way)
 			for j := 0; j < numEntries; j++ {
-				if err := writer.Add(ids[j], values[j]); err != nil {
+				err = bufferedWriter.Add(ids[j], values[j])
+				if err != nil {
 					b.Fatalf("Failed to add entry: %v", err)
 				}
 			}
 
-			// Stop timing for cleanup
 			b.StopTimer()
-
-			// Clean up
-			writer.Close()
-			os.Remove(filename)
+			err = bufferedWriter.Close()
+			if err != nil {
+				os.Remove(tempFilePath)
+				b.Fatalf("Failed to close writer: %v", err)
+			}
+			os.Remove(tempFilePath)
 		}
 	})
 
-	b.Run("StandardWriteBlock1K", func(b *testing.B) {
+	b.Run("BufferedWriter_BatchAdd", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			// Reset the timer while we set up
 			b.StopTimer()
-			filename := filepath.Join(tempDir, "standard_block_benchmark.col")
-			writer, err := NewWriter(filename, WithBlockSize(blockSize))
+			// Create a temporary file
+			f, err := os.CreateTemp("", "bench-buffered-*.col")
 			if err != nil {
-				b.Fatalf("Failed to create writer: %v", err)
+				b.Fatalf("Failed to create temp file: %v", err)
 			}
+			tempFilePath := f.Name()
+			f.Close() // Close immediately as the writer will open it
 
-			// Start timing
+			// Create a buffered writer with 16KB blocks
+			bufferedWriter, err := NewBufferedWriter(tempFilePath, WithBufferedBlockSize(16*1024))
+			if err != nil {
+				os.Remove(tempFilePath)
+				b.Fatalf("Failed to create buffered writer: %v", err)
+			}
 			b.StartTimer()
 
-			// Write a single block with all entries
-			if err := writer.WriteBlock(ids, values); err != nil {
-				b.Fatalf("Failed to write block: %v", err)
-			}
-
-			// Finalize and close
-			if err := writer.FinalizeAndClose(); err != nil {
-				b.Fatalf("Failed to finalize and close: %v", err)
-			}
-
-			// Stop timing for cleanup
-			b.StopTimer()
-
-			// Clean up
-			os.Remove(filename)
-		}
-	})
-
-	b.Run("BufferedWriteBlock1K", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			// Reset the timer while we set up
-			b.StopTimer()
-			filename := filepath.Join(tempDir, "buffered_block_benchmark.col")
-
-			// Create new BlockData from IDs and values
-			blockData, _ := prepareTestBlockData(ids, values, EncodingRaw)
-
-			writer, err := NewBufferedWriter(filename, WithBufferedBlockSize(blockSize))
+			// Use the new BatchAdd method for all entries
+			err = bufferedWriter.BatchAdd(ids, values)
 			if err != nil {
-				b.Fatalf("Failed to create writer: %v", err)
+				b.Fatalf("Failed to batch add entries: %v", err)
 			}
 
-			// Start timing
-			b.StartTimer()
-
-			// Write block
-			if err := writer.WriteBlock(blockData); err != nil {
-				b.Fatalf("Failed to write block: %v", err)
-			}
-
-			// Close
-			if err := writer.Close(); err != nil {
-				b.Fatalf("Failed to close: %v", err)
-			}
-
-			// Stop timing for cleanup
 			b.StopTimer()
-
-			// Clean up
-			os.Remove(filename)
+			err = bufferedWriter.Close()
+			if err != nil {
+				os.Remove(tempFilePath)
+				b.Fatalf("Failed to close writer: %v", err)
+			}
+			os.Remove(tempFilePath)
 		}
 	})
 }

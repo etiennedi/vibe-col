@@ -204,6 +204,157 @@ func (bw *BufferedWriter) Add(id uint64, value int64) error {
 	return nil
 }
 
+// BatchAdd adds multiple ID-value pairs at once, which is much more efficient than
+// calling Add multiple times. This is especially beneficial for large numbers of entries.
+func (bw *BufferedWriter) BatchAdd(ids []uint64, values []int64) error {
+	if bw.closed {
+		return fmt.Errorf("writer is already closed")
+	}
+
+	if len(ids) != len(values) {
+		return fmt.Errorf("ids and values must have the same length")
+	}
+
+	if len(ids) == 0 {
+		return nil // Nothing to do
+	}
+
+	// If we have pending data and we'd exceed the block size target, flush first
+	if bw.pendingData != nil {
+		// Estimate a worst-case scenario: 16 bytes per entry (for both ID and value)
+		worstCaseAddition := uint32(len(ids) * 16)
+		if bw.CurrentBlockSize()+worstCaseAddition > bw.blockSizeTarget {
+			if err := bw.Flush(); err != nil {
+				return fmt.Errorf("failed to flush before batch add: %w", err)
+			}
+		}
+	}
+
+	// Process all entries
+	for i := 0; i < len(ids); i++ {
+		id := ids[i]
+		value := values[i]
+
+		// If this entry would make the block too large, flush first
+		if bw.pendingData != nil && bw.CurrentBlockSize()+16 > bw.blockSizeTarget {
+			if err := bw.Flush(); err != nil {
+				return fmt.Errorf("failed to flush during batch add: %w", err)
+			}
+		}
+
+		// If we don't have pending data yet, initialize it with the first entry
+		if bw.pendingData == nil {
+			bw.pendingData = &BlockData{
+				MinID:                  id,
+				MaxID:                  id,
+				MinValue:               value,
+				MaxValue:               value,
+				Sum:                    value,
+				Count:                  1,
+				SerializedIDSection:    make([]byte, 0, 4096),
+				SerializedValueSection: make([]byte, 0, 4096),
+			}
+
+			// First ID and value are not delta encoded, so we only need to pay
+			// attention to varint or not
+			var idEncoded []byte
+			var valueEncoded []byte
+			// if we're using varint encoding, we need to encode first to know the size
+			if bw.encodingType == EncodingVarIntID || bw.encodingType == EncodingVarIntBoth {
+				idEncoded = encodeVarInt(id)
+			} else {
+				idEncoded = make([]byte, 8)
+				binary.LittleEndian.PutUint64(idEncoded, id)
+			}
+
+			if bw.encodingType == EncodingVarIntValue || bw.encodingType == EncodingVarIntBoth {
+				valueEncoded = encodeSignedVarInt(value)
+			} else {
+				valueEncoded = make([]byte, 8)
+				binary.LittleEndian.PutUint64(valueEncoded, int64ToUint64(value))
+			}
+
+			bw.pendingData.SerializedIDSection = bw.pendingData.SerializedIDSection[:len(idEncoded)] // always safe, we create a much larger buffer
+			copy(bw.pendingData.SerializedIDSection, idEncoded)
+			bw.pendingData.SerializedValueSection = bw.pendingData.SerializedValueSection[:len(valueEncoded)] // always safe, we create a much larger buffer
+			copy(bw.pendingData.SerializedValueSection, valueEncoded)
+
+		} else {
+			// In case of delta encoding we need to override the id with the delta id
+			idToWrite := id
+			if bw.encodingType == EncodingDeltaID || bw.encodingType == EncodingDeltaBoth || bw.encodingType == EncodingVarIntID || bw.encodingType == EncodingVarIntBoth {
+				idToWrite = id - bw.lastID
+			}
+			// In case of delta encoding we need to override the value with the delta value
+			valueToWrite := value
+			if bw.encodingType == EncodingDeltaValue || bw.encodingType == EncodingDeltaBoth || bw.encodingType == EncodingVarIntValue || bw.encodingType == EncodingVarIntBoth {
+				valueToWrite = value - bw.lastValue
+			}
+
+			var idEncoded []byte
+			var valueEncoded []byte
+			// if we're using varint encoding, we need to encode first to know the size
+			if bw.encodingType == EncodingVarIntID || bw.encodingType == EncodingVarIntBoth {
+				idEncoded = encodeVarInt(idToWrite)
+			} else {
+				idEncoded = make([]byte, 8)
+				binary.LittleEndian.PutUint64(idEncoded, idToWrite)
+			}
+
+			if bw.encodingType == EncodingVarIntValue || bw.encodingType == EncodingVarIntBoth {
+				valueEncoded = encodeSignedVarInt(valueToWrite)
+			} else {
+				valueEncoded = make([]byte, 8)
+				binary.LittleEndian.PutUint64(valueEncoded, int64ToUint64(valueToWrite))
+			}
+
+			if len(bw.pendingData.SerializedIDSection)+len(idEncoded) > cap(bw.pendingData.SerializedIDSection) {
+				// we need to grow the slice
+				newSlice := make([]byte, len(bw.pendingData.SerializedIDSection), cap(bw.pendingData.SerializedIDSection)*2)
+				copy(newSlice, bw.pendingData.SerializedIDSection)
+				bw.pendingData.SerializedIDSection = newSlice
+			}
+
+			// we know we have enough space
+			bw.pendingData.SerializedIDSection = bw.pendingData.SerializedIDSection[:len(bw.pendingData.SerializedIDSection)+len(idEncoded)]
+			copy(bw.pendingData.SerializedIDSection[len(bw.pendingData.SerializedIDSection)-len(idEncoded):], idEncoded)
+
+			if len(bw.pendingData.SerializedValueSection)+len(valueEncoded) > cap(bw.pendingData.SerializedValueSection) {
+				// we need to grow the slice
+				newSlice := make([]byte, len(bw.pendingData.SerializedValueSection), cap(bw.pendingData.SerializedValueSection)*2)
+				copy(newSlice, bw.pendingData.SerializedValueSection)
+				bw.pendingData.SerializedValueSection = newSlice
+			}
+
+			// we know we have enough space
+			bw.pendingData.SerializedValueSection = bw.pendingData.SerializedValueSection[:len(bw.pendingData.SerializedValueSection)+len(valueEncoded)]
+			copy(bw.pendingData.SerializedValueSection[len(bw.pendingData.SerializedValueSection)-len(valueEncoded):], valueEncoded)
+
+			// Update statistics
+			if id < bw.pendingData.MinID {
+				bw.pendingData.MinID = id
+			}
+			if id > bw.pendingData.MaxID {
+				bw.pendingData.MaxID = id
+			}
+			if value < bw.pendingData.MinValue {
+				bw.pendingData.MinValue = value
+			}
+			if value > bw.pendingData.MaxValue {
+				bw.pendingData.MaxValue = value
+			}
+			bw.pendingData.Sum += value
+			bw.pendingData.Count++
+		}
+
+		bw.globalIDs.Set(id)
+		bw.lastID = id
+		bw.lastValue = value
+	}
+
+	return nil
+}
+
 func (bw *BufferedWriter) CurrentBlockSize() uint32 {
 	if bw.pendingData == nil {
 		return 0

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -467,13 +468,18 @@ func generateSequentialValues(start, count int) []int64 {
 // TestLargeBufferedWrite tests adding a large number of entries with the buffered writer
 // and analyzes the resulting block statistics, validating that blocks are close to the target size
 func TestLargeBufferedWrite(t *testing.T) {
+	// Skip in short mode
+	if testing.Short() {
+		t.Skip("Skipping in short mode")
+	}
+
 	const numEntries = 100000
 
 	// Test with multiple block sizes
 	blockSizes := []int{8 * 1024, 16 * 1024, 32 * 1024} // 8KB, 16KB, 32KB
 
 	for _, targetBlockSize := range blockSizes {
-		t.Run(fmt.Sprintf("BlockSize_%dKB", targetBlockSize/1024), func(t *testing.T) {
+		t.Run(fmt.Sprintf("BlockSize_%dKB_SingleAdd", targetBlockSize/1024), func(t *testing.T) {
 			// Create a temporary file for testing
 			f, err := os.CreateTemp("", "test-large-bufferedwriter-*.col")
 			if err != nil {
@@ -498,20 +504,14 @@ func TestLargeBufferedWrite(t *testing.T) {
 				values = append(values, int64(i*10))
 			}
 
-			// Add entries in batches to avoid potential memory issues
-			const batchSize = 5000
-			for i := 0; i < numEntries; i += batchSize {
-				end := i + batchSize
-				if end > numEntries {
-					end = numEntries
-				}
+			// Profiling: we'll time just the writing portion
+			writeStart := time.Now()
 
-				// Add entries one by one within the batch
-				for j := i; j < end; j++ {
-					err = bufferedWriter.Add(ids[j], values[j])
-					if err != nil {
-						t.Fatalf("Failed to add entry %d: %v", j, err)
-					}
+			// Add entries one by one (single add)
+			for i := 0; i < numEntries; i++ {
+				err = bufferedWriter.Add(ids[i], values[i])
+				if err != nil {
+					t.Fatalf("Failed to add entry %d: %v", i, err)
 				}
 			}
 
@@ -521,148 +521,226 @@ func TestLargeBufferedWrite(t *testing.T) {
 				t.Fatalf("Failed to close writer: %v", err)
 			}
 
-			// Reopen the file for reading
-			f, err = os.Open(f.Name())
+			// Calculate write time
+			writeTime := time.Since(writeStart)
+			entriesPerSecond := float64(numEntries) / writeTime.Seconds()
+			bytesPerSecond := float64(numEntries*16) / writeTime.Seconds() // 8 bytes for ID, 8 bytes for value
+
+			t.Logf("Performance metrics (single Add):")
+			t.Logf("  Total write time: %.3f seconds", writeTime.Seconds())
+			t.Logf("  Entries per second: %.2f", entriesPerSecond)
+			t.Logf("  Bytes per second: %.2f (%.2f MB/s)", bytesPerSecond, bytesPerSecond/1024/1024)
+
+			analyzeFile(t, f.Name())
+		})
+
+		t.Run(fmt.Sprintf("BlockSize_%dKB_BatchAdd", targetBlockSize/1024), func(t *testing.T) {
+			// Create a temporary file for testing
+			f, err := os.CreateTemp("", "test-large-bufferedwriter-batch-*.col")
 			if err != nil {
-				t.Fatalf("Failed to reopen file: %v", err)
+				t.Fatalf("Failed to create temp file: %v", err)
 			}
+			defer os.Remove(f.Name())
 			defer f.Close()
 
-			// Create a reader
-			reader, err := NewReader(f.Name())
+			// Create a buffered writer
+			bufferedWriter, err := NewBufferedWriter(f.Name(), WithBufferedBlockSize(uint32(targetBlockSize)))
 			if err != nil {
-				t.Fatalf("Failed to create reader: %v", err)
+				t.Fatalf("Failed to create buffered writer: %v", err)
 			}
 
-			// Get file size
-			fileInfo, err := f.Stat()
+			// Generate test data
+			t.Logf("Adding %d entries to buffered writer with target block size %d bytes", numEntries, targetBlockSize)
+			var ids []uint64
+			var values []int64
+
+			for i := 0; i < numEntries; i++ {
+				ids = append(ids, uint64(i+1))
+				values = append(values, int64(i*10))
+			}
+
+			// Profiling: we'll time just the writing portion
+			writeStart := time.Now()
+
+			// Add entries in batches to demonstrate BatchAdd performance
+			const batchSize = 1000
+			for i := 0; i < numEntries; i += batchSize {
+				end := i + batchSize
+				if end > numEntries {
+					end = numEntries
+				}
+
+				// Use BatchAdd method for better performance
+				err = bufferedWriter.BatchAdd(ids[i:end], values[i:end])
+				if err != nil {
+					t.Fatalf("Failed to batch add entries %d-%d: %v", i, end, err)
+				}
+			}
+
+			// Close the writer to finalize the file
+			err = bufferedWriter.Close()
 			if err != nil {
-				t.Fatalf("Failed to get file stats: %v", err)
-			}
-			t.Logf("File size: %d bytes", fileInfo.Size())
-
-			// Analyze the blocks
-			blockCount := len(reader.blockIndex)
-			t.Logf("Total blocks: %d", blockCount)
-
-			// Calculate statistics
-			totalEntries := 0
-			minBlockSize := int64(math.MaxInt64)
-			maxBlockSize := int64(0)
-			totalBlockSize := int64(0)
-
-			minEntriesPerBlock := math.MaxInt64
-			maxEntriesPerBlock := 0
-
-			// Block size distribution buckets (in KB)
-			sizeDistribution := make(map[int]int)
-			// Keep track of blocks outside the target range
-			blocksOutsideTargetRange := 0
-
-			// Define acceptable range: blocks should be within 25% of target size
-			// except for the last block which can be smaller
-			acceptableMinSize := int64(float64(targetBlockSize) * 0.75)
-			acceptableMaxSize := int64(float64(targetBlockSize) * 1.25)
-
-			for i := 0; i < blockCount; i++ {
-				blockOffset := reader.blockIndex[i].BlockOffset
-				blockSize := int64(reader.blockIndex[i].BlockSize)
-				entriesCount := int(reader.blockIndex[i].Count)
-
-				totalEntries += entriesCount
-				totalBlockSize += blockSize
-
-				if blockSize < minBlockSize {
-					minBlockSize = blockSize
-				}
-				if blockSize > maxBlockSize {
-					maxBlockSize = blockSize
-				}
-
-				if entriesCount < minEntriesPerBlock {
-					minEntriesPerBlock = entriesCount
-				}
-				if entriesCount > maxEntriesPerBlock {
-					maxEntriesPerBlock = entriesCount
-				}
-
-				// Record in distribution buckets (round to nearest KB)
-				sizeInKB := int(blockSize / 1024)
-				sizeDistribution[sizeInKB]++
-
-				// Print detailed info for first few and last few blocks
-				if i < 3 || i >= blockCount-3 {
-					t.Logf("Block %d: Offset=%d, Size=%d bytes, Entries=%d",
-						i, blockOffset, blockSize, entriesCount)
-				} else if i == 3 && blockCount > 6 {
-					t.Logf("... skipping %d blocks ...", blockCount-6)
-				}
-
-				// Check if block size is within acceptable range
-				// The last block is allowed to be smaller
-				if i < blockCount-1 && (blockSize < acceptableMinSize || blockSize > acceptableMaxSize) {
-					blocksOutsideTargetRange++
-					t.Logf("Block %d size %d bytes is outside acceptable range (%d-%d bytes)",
-						i, blockSize, acceptableMinSize, acceptableMaxSize)
-				}
+				t.Fatalf("Failed to close writer: %v", err)
 			}
 
-			// Calculate and display statistics
-			var avgBlockSize float64
-			var avgEntriesPerBlock float64
+			// Calculate write time
+			writeTime := time.Since(writeStart)
+			entriesPerSecond := float64(numEntries) / writeTime.Seconds()
+			bytesPerSecond := float64(numEntries*16) / writeTime.Seconds() // 8 bytes for ID, 8 bytes for value
 
-			if blockCount > 0 {
-				avgBlockSize = float64(totalBlockSize) / float64(blockCount)
-				avgEntriesPerBlock = float64(totalEntries) / float64(blockCount)
-			}
+			t.Logf("Performance metrics (BatchAdd):")
+			t.Logf("  Total write time: %.3f seconds", writeTime.Seconds())
+			t.Logf("  Entries per second: %.2f", entriesPerSecond)
+			t.Logf("  Bytes per second: %.2f (%.2f MB/s)", bytesPerSecond, bytesPerSecond/1024/1024)
 
-			t.Logf("Block size statistics:")
-			if blockCount > 0 {
-				t.Logf("  Min: %d bytes", minBlockSize)
-				t.Logf("  Max: %d bytes", maxBlockSize)
-				t.Logf("  Avg: %.2f bytes", avgBlockSize)
-				t.Logf("  Target: %d bytes", targetBlockSize)
-			} else {
-				t.Logf("  No blocks found")
-			}
-			t.Logf("  Total: %d bytes", totalBlockSize)
-
-			t.Logf("Entries per block statistics:")
-			if blockCount > 0 {
-				t.Logf("  Min: %d entries", minEntriesPerBlock)
-				t.Logf("  Max: %d entries", maxEntriesPerBlock)
-				t.Logf("  Avg: %.2f entries", avgEntriesPerBlock)
-			} else {
-				t.Logf("  No blocks found")
-			}
-			t.Logf("  Total: %d entries", totalEntries)
-
-			// Sort and display size distribution
-			var sizes []int
-			for size := range sizeDistribution {
-				sizes = append(sizes, size)
-			}
-			sort.Ints(sizes)
-
-			t.Logf("Block size distribution (KB):")
-			for _, size := range sizes {
-				count := sizeDistribution[size]
-				percentage := float64(count) / float64(blockCount) * 100
-				t.Logf("  %d KB: %d blocks (%.1f%%)", size, count, percentage)
-			}
-
-			// Verify correct number of entries
-			if totalEntries != numEntries {
-				t.Errorf("Expected %d total entries, got %d", numEntries, totalEntries)
-			}
-
-			// Calculate acceptable percentage of blocks outside the target range
-			// For simplicity, we'll allow 5% of blocks to be outside range, excluding the last block
-			maxAllowedOutsideRange := int(float64(blockCount-1) * 0.05)
-			if blocksOutsideTargetRange > maxAllowedOutsideRange {
-				t.Errorf("Too many blocks (%d) outside acceptable size range (%d-%d bytes). Maximum allowed: %d",
-					blocksOutsideTargetRange, acceptableMinSize, acceptableMaxSize, maxAllowedOutsideRange)
-			}
+			analyzeFile(t, f.Name())
 		})
+	}
+}
+
+// analyzeFile is a helper function to analyze a column file
+func analyzeFile(t *testing.T, filename string) {
+	// Reopen the file for reading
+	f, err := os.Open(filename)
+	if err != nil {
+		t.Fatalf("Failed to reopen file: %v", err)
+	}
+	defer f.Close()
+
+	// Create a reader
+	reader, err := NewReader(filename)
+	if err != nil {
+		t.Fatalf("Failed to create reader: %v", err)
+	}
+
+	// Get file size
+	fileInfo, err := f.Stat()
+	if err != nil {
+		t.Fatalf("Failed to get file stats: %v", err)
+	}
+	t.Logf("File size: %d bytes", fileInfo.Size())
+
+	// Analyze the blocks
+	blockCount := len(reader.blockIndex)
+	t.Logf("Total blocks: %d", blockCount)
+
+	// Calculate statistics
+	totalEntries := 0
+	minBlockSize := int64(math.MaxInt64)
+	maxBlockSize := int64(0)
+	totalBlockSize := int64(0)
+
+	minEntriesPerBlock := math.MaxInt64
+	maxEntriesPerBlock := 0
+
+	// Block size distribution buckets (in KB)
+	sizeDistribution := make(map[int]int)
+	// Keep track of blocks outside the target range
+	blocksOutsideTargetRange := 0
+
+	// Define acceptable range: blocks should be within 25% of target size
+	// except for the last block which can be smaller
+	targetBlockSize := int64(reader.header.BlockSizeTarget)
+	acceptableMinSize := int64(float64(targetBlockSize) * 0.75)
+	acceptableMaxSize := int64(float64(targetBlockSize) * 1.25)
+
+	for i := 0; i < blockCount; i++ {
+		blockOffset := reader.blockIndex[i].BlockOffset
+		blockSize := int64(reader.blockIndex[i].BlockSize)
+		entriesCount := int(reader.blockIndex[i].Count)
+
+		totalEntries += entriesCount
+		totalBlockSize += blockSize
+
+		if blockSize < minBlockSize {
+			minBlockSize = blockSize
+		}
+		if blockSize > maxBlockSize {
+			maxBlockSize = blockSize
+		}
+
+		if entriesCount < minEntriesPerBlock {
+			minEntriesPerBlock = entriesCount
+		}
+		if entriesCount > maxEntriesPerBlock {
+			maxEntriesPerBlock = entriesCount
+		}
+
+		// Record in distribution buckets (round to nearest KB)
+		sizeInKB := int(blockSize / 1024)
+		sizeDistribution[sizeInKB]++
+
+		// Print detailed info for first few and last few blocks
+		if i < 3 || i >= blockCount-3 {
+			t.Logf("Block %d: Offset=%d, Size=%d bytes, Entries=%d",
+				i, blockOffset, blockSize, entriesCount)
+		} else if i == 3 && blockCount > 6 {
+			t.Logf("... skipping %d blocks ...", blockCount-6)
+		}
+
+		// Check if block size is within acceptable range
+		// The last block is allowed to be smaller
+		if i < blockCount-1 && (blockSize < acceptableMinSize || blockSize > acceptableMaxSize) {
+			blocksOutsideTargetRange++
+			t.Logf("Block %d size %d bytes is outside acceptable range (%d-%d bytes)",
+				i, blockSize, acceptableMinSize, acceptableMaxSize)
+		}
+	}
+
+	// Calculate and display statistics
+	var avgBlockSize float64
+	var avgEntriesPerBlock float64
+
+	if blockCount > 0 {
+		avgBlockSize = float64(totalBlockSize) / float64(blockCount)
+		avgEntriesPerBlock = float64(totalEntries) / float64(blockCount)
+	}
+
+	t.Logf("Block size statistics:")
+	if blockCount > 0 {
+		t.Logf("  Min: %d bytes", minBlockSize)
+		t.Logf("  Max: %d bytes", maxBlockSize)
+		t.Logf("  Avg: %.2f bytes", avgBlockSize)
+		t.Logf("  Target: %d bytes", targetBlockSize)
+	} else {
+		t.Logf("  No blocks found")
+	}
+	t.Logf("  Total: %d bytes", totalBlockSize)
+
+	t.Logf("Entries per block statistics:")
+	if blockCount > 0 {
+		t.Logf("  Min: %d entries", minEntriesPerBlock)
+		t.Logf("  Max: %d entries", maxEntriesPerBlock)
+		t.Logf("  Avg: %.2f entries", avgEntriesPerBlock)
+	} else {
+		t.Logf("  No blocks found")
+	}
+	t.Logf("  Total: %d entries", totalEntries)
+
+	// Sort and display size distribution
+	var sizes []int
+	for size := range sizeDistribution {
+		sizes = append(sizes, size)
+	}
+	sort.Ints(sizes)
+
+	t.Logf("Block size distribution (KB):")
+	for _, size := range sizes {
+		count := sizeDistribution[size]
+		percentage := float64(count) / float64(blockCount) * 100
+		t.Logf("  %d KB: %d blocks (%.1f%%)", size, count, percentage)
+	}
+
+	// Verify correct number of entries
+	if totalEntries != 100000 { // hardcoded from the test's numEntries const
+		t.Errorf("Expected %d total entries, got %d", 100000, totalEntries)
+	}
+
+	// Calculate acceptable percentage of blocks outside the target range
+	// For simplicity, we'll allow 5% of blocks to be outside range, excluding the last block
+	maxAllowedOutsideRange := int(float64(blockCount-1) * 0.05)
+	if blocksOutsideTargetRange > maxAllowedOutsideRange {
+		t.Errorf("Too many blocks (%d) outside acceptable size range (%d-%d bytes). Maximum allowed: %d",
+			blocksOutsideTargetRange, acceptableMinSize, acceptableMaxSize, maxAllowedOutsideRange)
 	}
 }
