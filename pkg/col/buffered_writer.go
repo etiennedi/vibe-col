@@ -209,6 +209,13 @@ func (bw *BufferedWriter) CurrentBlockSize() uint32 {
 		return 0
 	}
 
+	reservedSpace := 0
+	if len(bw.blockIndex) == 0 {
+		// the first block is smaller then the others because it's written after
+		// the header and page-aligned together
+		reservedSpace += headerSize
+	}
+
 	// The size of a block is the combination of the block header, the layout, and the serialized id and values data
-	return uint32(blockHeaderSize + blockLayoutSize + len(bw.pendingData.SerializedIDSection) + len(bw.pendingData.SerializedValueSection))
+	return uint32(reservedSpace + blockHeaderSize + blockLayoutSize + len(bw.pendingData.SerializedIDSection) + len(bw.pendingData.SerializedValueSection))
 }
