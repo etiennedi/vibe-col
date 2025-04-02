@@ -188,7 +188,7 @@ type BlockHeader struct {
 
 // Serialize serializes the BlockHeader into a byte slice
 func (bh *BlockHeader) Serialize() []byte {
-	buf := make([]byte, 64)
+	buf := make([]byte, blockHeaderSize)
 	offset := 0
 
 	// Write all fields directly into the buffer
@@ -223,14 +223,17 @@ func (bh *BlockHeader) Serialize() []byte {
 	offset += uint32Size
 
 	binary.LittleEndian.PutUint64(buf[offset:], bh.Checksum)
+	offset += uint64Size
+
+	// The rest of the buffer (32 bytes) is already zeroed by make(), which serves as the reserved space
 
 	return buf
 }
 
 // Deserialize deserializes a byte slice into the BlockHeader
 func (bh *BlockHeader) Deserialize(buf []byte) error {
-	if len(buf) < 64 {
-		return fmt.Errorf("buffer too small for BlockHeader: expected 64 bytes, got %d", len(buf))
+	if len(buf) < blockHeaderSize {
+		return fmt.Errorf("buffer too small for BlockHeader: expected %d bytes, got %d", blockHeaderSize, len(buf))
 	}
 
 	offset := 0
