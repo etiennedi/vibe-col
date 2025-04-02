@@ -1,7 +1,6 @@
 package col
 
 import (
-	"encoding/binary"
 	"fmt"
 )
 
@@ -24,40 +23,48 @@ func (r *Reader) readEntireBlock(blockIndex int) ([]uint64, []int64, error) {
 		return nil, nil, fmt.Errorf("failed to read block: %w", err)
 	}
 
-	// Skip the block header (64 bytes) and parse the layout section (next 16 bytes)
-	idSectionOffset := binary.LittleEndian.Uint32(blockData[blockHeaderSize : blockHeaderSize+4])
-	idSectionSize := binary.LittleEndian.Uint32(blockData[blockHeaderSize+4 : blockHeaderSize+8])
-	valueSectionOffset := binary.LittleEndian.Uint32(blockData[blockHeaderSize+8 : blockHeaderSize+12])
-	valueSectionSize := binary.LittleEndian.Uint32(blockData[blockHeaderSize+12 : blockHeaderSize+16])
+	// Extract the block header (first 64 bytes)
+	headerBytes := blockData[:blockHeaderSize]
+	var blockHeader BlockHeader
+	if err := blockHeader.Deserialize(headerBytes); err != nil {
+		return nil, nil, fmt.Errorf("failed to deserialize block header: %w", err)
+	}
+
+	// Extract the block layout (next 16 bytes)
+	layoutBytes := blockData[blockHeaderSize : blockHeaderSize+blockLayoutSize]
+	var layout BlockLayout
+	if err := layout.Deserialize(layoutBytes); err != nil {
+		return nil, nil, fmt.Errorf("failed to deserialize block layout: %w", err)
+	}
 
 	// If the section sizes are zero, try the alternate layout offset
-	if idSectionSize == 0 || valueSectionSize == 0 {
+	if layout.IDSectionSize == 0 || layout.ValueSectionSize == 0 {
 		// Check if there's enough data to read from the alternate offset
 		layoutOffset := 128 - blockOffset
-		if layoutOffset >= 0 && layoutOffset+16 <= int64(len(blockData)) {
+		if layoutOffset >= 0 && layoutOffset+blockLayoutSize <= int64(len(blockData)) {
 			// Read layout from alternate offset
-			idSectionOffset = binary.LittleEndian.Uint32(blockData[layoutOffset : layoutOffset+4])
-			idSectionSize = binary.LittleEndian.Uint32(blockData[layoutOffset+4 : layoutOffset+8])
-			valueSectionOffset = binary.LittleEndian.Uint32(blockData[layoutOffset+8 : layoutOffset+12])
-			valueSectionSize = binary.LittleEndian.Uint32(blockData[layoutOffset+12 : layoutOffset+16])
+			altLayoutBytes := blockData[layoutOffset : layoutOffset+blockLayoutSize]
+			if err := layout.Deserialize(altLayoutBytes); err != nil {
+				return nil, nil, fmt.Errorf("failed to deserialize alternate block layout: %w", err)
+			}
 		}
 	}
 
 	// Validate section sizes
-	if idSectionSize == 0 {
+	if layout.IDSectionSize == 0 {
 		return nil, nil, fmt.Errorf("id section size in header is 0")
 	}
-	if valueSectionSize == 0 {
+	if layout.ValueSectionSize == 0 {
 		return nil, nil, fmt.Errorf("value section size in header is 0")
 	}
 
 	// Extract ID and value sections from the buffer
 	// The layout section is 16 bytes, followed by the data sections
-	idStart := blockHeaderSize + 16 + int(idSectionOffset)
-	idEnd := idStart + int(idSectionSize)
+	idStart := blockHeaderSize + blockLayoutSize + int(layout.IDSectionOffset)
+	idEnd := idStart + int(layout.IDSectionSize)
 
-	valueStart := blockHeaderSize + 16 + int(valueSectionOffset)
-	valueEnd := valueStart + int(valueSectionSize)
+	valueStart := blockHeaderSize + blockLayoutSize + int(layout.ValueSectionOffset)
+	valueEnd := valueStart + int(layout.ValueSectionSize)
 
 	// Validate buffer boundaries
 	if idEnd > len(blockData) || valueEnd > len(blockData) {
