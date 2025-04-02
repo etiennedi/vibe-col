@@ -61,36 +61,46 @@ func (bw *BufferedWriter) writeHeader() error {
 	// Create the header with default values
 	header := NewFileHeader(0, bw.blockSizeTarget, bw.encodingType)
 
-	// Create a buffer for the header fields
-	headerFields := []interface{}{
-		header.Magic,
-		header.Version,
-		header.ColumnType,
-		header.BlockCount,
-		header.BlockSizeTarget,
-		header.CompressionType,
-		header.EncodingType,
-		header.CreationTime,
-		header.BitmapOffset,
-		header.BitmapSize,
-	}
+	// Allocate a single buffer for the entire header (64 bytes)
+	headerBuf := make([]byte, headerSize)
+	offset := 0
 
-	// Write all header fields
-	for i, field := range headerFields {
-		if err := binary.Write(bw.file, binary.LittleEndian, field); err != nil {
-			return fmt.Errorf("failed to write header field %d: %w", i, err)
-		}
-	}
+	// Write all fields directly into the buffer
+	binary.LittleEndian.PutUint64(headerBuf[offset:], header.Magic)
+	offset += 8
 
-	// Calculate reserved space - sum of the sizes of the header fields we've written
-	headerFieldsSize := uint64Size + uint32Size + uint32Size + uint64Size +
-		uint32Size + uint32Size + uint32Size + uint64Size + uint64Size + uint64Size
-	reservedSize := headerSize - headerFieldsSize
+	binary.LittleEndian.PutUint32(headerBuf[offset:], header.Version)
+	offset += 4
 
-	// Write reserved space to fill up to 64 bytes
-	reserved := make([]byte, reservedSize)
-	if _, err := bw.file.Write(reserved); err != nil {
-		return fmt.Errorf("failed to write reserved space: %w", err)
+	binary.LittleEndian.PutUint32(headerBuf[offset:], header.ColumnType)
+	offset += 4
+
+	binary.LittleEndian.PutUint64(headerBuf[offset:], header.BlockCount)
+	offset += 8
+
+	binary.LittleEndian.PutUint32(headerBuf[offset:], header.BlockSizeTarget)
+	offset += 4
+
+	binary.LittleEndian.PutUint32(headerBuf[offset:], header.CompressionType)
+	offset += 4
+
+	binary.LittleEndian.PutUint32(headerBuf[offset:], header.EncodingType)
+	offset += 4
+
+	binary.LittleEndian.PutUint64(headerBuf[offset:], header.CreationTime)
+	offset += 8
+
+	binary.LittleEndian.PutUint64(headerBuf[offset:], header.BitmapOffset)
+	offset += 8
+
+	binary.LittleEndian.PutUint64(headerBuf[offset:], header.BitmapSize)
+	offset += 8
+
+	// The rest of the buffer is already zeroed by make(), which serves as the reserved space
+
+	// Write the entire buffer at once
+	if _, err := bw.file.Write(headerBuf); err != nil {
+		return fmt.Errorf("failed to write header: %w", err)
 	}
 
 	// Verify header size
@@ -143,28 +153,52 @@ func (bw *BufferedWriter) finalize() error {
 		blockCount = 1
 	}
 
-	if err := binary.Write(bw.file, binary.LittleEndian, blockCount); err != nil {
+	// Allocate buffer for the block count (4 bytes)
+	blockCountBuf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(blockCountBuf, blockCount)
+	if _, err := bw.file.Write(blockCountBuf); err != nil {
 		return fmt.Errorf("failed to write block index count: %w", err)
 	}
 
 	// Write block index entries
 	if len(bw.blockIndex) > 0 {
-		// Write actual block entries
-		for _, entry := range bw.blockIndex {
-			// Verify that the entry is the correct size before writing
-			entryStart, _ := bw.file.Seek(0, io.SeekCurrent)
+		// Each footer entry should be 56 bytes (struct FooterEntry)
+		// Allocate a buffer for all entries at once
+		entrySize := 56
+		entriesBuf := make([]byte, entrySize*len(bw.blockIndex))
 
-			if err := binary.Write(bw.file, binary.LittleEndian, entry); err != nil {
-				return fmt.Errorf("failed to write footer entry: %w", err)
-			}
+		for i, entry := range bw.blockIndex {
+			offset := i * entrySize
 
-			entryEnd, _ := bw.file.Seek(0, io.SeekCurrent)
-			entrySize := entryEnd - entryStart
+			// Write entry fields to buffer
+			binary.LittleEndian.PutUint64(entriesBuf[offset:], entry.BlockOffset)
+			offset += 8
 
-			// Each footer entry should be 56 bytes (struct FooterEntry)
-			if entrySize != 56 {
-				return fmt.Errorf("footer entry size mismatch: expected=56, actual=%d", entrySize)
-			}
+			binary.LittleEndian.PutUint32(entriesBuf[offset:], entry.BlockSize)
+			offset += 4
+
+			binary.LittleEndian.PutUint64(entriesBuf[offset:], entry.MinID)
+			offset += 8
+
+			binary.LittleEndian.PutUint64(entriesBuf[offset:], entry.MaxID)
+			offset += 8
+
+			binary.LittleEndian.PutUint64(entriesBuf[offset:], entry.MinValue)
+			offset += 8
+
+			binary.LittleEndian.PutUint64(entriesBuf[offset:], entry.MaxValue)
+			offset += 8
+
+			binary.LittleEndian.PutUint64(entriesBuf[offset:], entry.Sum)
+			offset += 8
+
+			binary.LittleEndian.PutUint32(entriesBuf[offset:], entry.Count)
+			offset += 4
+		}
+
+		// Write all entries at once
+		if _, err := bw.file.Write(entriesBuf); err != nil {
+			return fmt.Errorf("failed to write footer entries: %w", err)
 		}
 	} else {
 		return fmt.Errorf("no block index entries to write")
@@ -179,15 +213,15 @@ func (bw *BufferedWriter) finalize() error {
 	// Calculate footer size
 	footerSize := footerEnd - footerStart
 
+	// Allocate buffer for footer metadata (24 bytes: footerSize + checksum + magic)
+	footerMetaBuf := make([]byte, 24)
+	binary.LittleEndian.PutUint64(footerMetaBuf[0:], uint64(footerSize))
+	binary.LittleEndian.PutUint64(footerMetaBuf[8:], uint64(0)) // checksum placeholder
+	binary.LittleEndian.PutUint64(footerMetaBuf[16:], MagicNumber)
+
 	// Write footer metadata
-	if err := binary.Write(bw.file, binary.LittleEndian, uint64(footerSize)); err != nil {
-		return fmt.Errorf("failed to write footer size: %w", err)
-	}
-	if err := binary.Write(bw.file, binary.LittleEndian, uint64(0)); err != nil {
-		return fmt.Errorf("failed to write checksum: %w", err)
-	}
-	if err := binary.Write(bw.file, binary.LittleEndian, MagicNumber); err != nil {
-		return fmt.Errorf("failed to write magic number: %w", err)
+	if _, err := bw.file.Write(footerMetaBuf); err != nil {
+		return fmt.Errorf("failed to write footer metadata: %w", err)
 	}
 
 	// Go back and update the header with final information
@@ -201,36 +235,51 @@ func (bw *BufferedWriter) finalize() error {
 	header.BitmapSize = bitmapSize
 	header.CreationTime = uint64(time.Now().Unix())
 
-	// Write header fields
-	headerFields := []interface{}{
-		header.Magic,
-		header.Version,
-		header.ColumnType,
-		header.BlockCount,
-		header.BlockSizeTarget,
-		header.CompressionType,
-		header.EncodingType,
-		header.CreationTime,
-		header.BitmapOffset,
-		header.BitmapSize,
-	}
+	// Calculate total size needed for header plus footer offset
+	// headerSize (64 bytes) plus 8 bytes for the footer offset
+	totalHeaderSize := headerSize + 8
 
-	// Write the fields we need to update
-	for i, field := range headerFields {
-		if err := binary.Write(bw.file, binary.LittleEndian, field); err != nil {
-			return fmt.Errorf("failed to write header field %d: %w", i, err)
-		}
-	}
+	// Allocate a buffer for the header plus the footer offset
+	headerBuf := make([]byte, totalHeaderSize)
+	offset := 0
 
-	// Write the footer offset - this is not in the header struct
-	// but we need to write it at the end of the header fields
-	if _, err := bw.file.Seek(uint64Size+uint32Size+uint32Size+uint64Size+
-		uint32Size+uint32Size+uint32Size+uint64Size+uint64Size+uint64Size, io.SeekStart); err != nil {
-		return fmt.Errorf("failed to seek to footer offset position: %w", err)
-	}
+	// Write all fields directly into the buffer
+	binary.LittleEndian.PutUint64(headerBuf[offset:], header.Magic)
+	offset += 8
 
-	if err := binary.Write(bw.file, binary.LittleEndian, uint64(footerStart)); err != nil {
-		return fmt.Errorf("failed to write footer offset: %w", err)
+	binary.LittleEndian.PutUint32(headerBuf[offset:], header.Version)
+	offset += 4
+
+	binary.LittleEndian.PutUint32(headerBuf[offset:], header.ColumnType)
+	offset += 4
+
+	binary.LittleEndian.PutUint64(headerBuf[offset:], header.BlockCount)
+	offset += 8
+
+	binary.LittleEndian.PutUint32(headerBuf[offset:], header.BlockSizeTarget)
+	offset += 4
+
+	binary.LittleEndian.PutUint32(headerBuf[offset:], header.CompressionType)
+	offset += 4
+
+	binary.LittleEndian.PutUint32(headerBuf[offset:], header.EncodingType)
+	offset += 4
+
+	binary.LittleEndian.PutUint64(headerBuf[offset:], header.CreationTime)
+	offset += 8
+
+	binary.LittleEndian.PutUint64(headerBuf[offset:], header.BitmapOffset)
+	offset += 8
+
+	binary.LittleEndian.PutUint64(headerBuf[offset:], header.BitmapSize)
+	offset += 8
+
+	// Add footer offset after the header
+	binary.LittleEndian.PutUint64(headerBuf[offset:], uint64(footerStart))
+
+	// Write the header buffer
+	if _, err := bw.file.Write(headerBuf); err != nil {
+		return fmt.Errorf("failed to write updated header: %w", err)
 	}
 
 	// Final sync to ensure everything is written to disk
@@ -253,8 +302,12 @@ func (bw *BufferedWriter) writeGlobalIDBitmap() (uint64, uint64, error) {
 	bitmapData := bw.globalIDs.ToBuffer()
 	bitmapSize := uint32(len(bitmapData))
 
-	// Write the bitmap size
-	if err := binary.Write(bw.file, binary.LittleEndian, bitmapSize); err != nil {
+	// Create a buffer for bitmap size (4 bytes)
+	bitmapSizeBuf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(bitmapSizeBuf, bitmapSize)
+
+	// Write bitmap size
+	if _, err := bw.file.Write(bitmapSizeBuf); err != nil {
 		return 0, 0, fmt.Errorf("failed to write bitmap size: %w", err)
 	}
 
