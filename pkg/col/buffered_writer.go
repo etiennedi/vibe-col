@@ -35,14 +35,11 @@ type BufferedWriter struct {
 	blockCount      uint64
 	encodingType    uint32
 	blockSizeTarget uint32
-	// blockPositions  []uint64        // Position of each block in the file
-	// blockSizes      []uint32        // Size of each block in bytes
-	// blockStats      []BlockStats    // Statistics for each block
-	blockIndex  []FooterEntry // Detailed index of blocks
-	globalIDs   *sroar.Bitmap
-	globalMinID uint64 // Global minimum ID
-	globalMaxID uint64 // Global maximum ID
-	closed      bool
+	blockIndex      []FooterEntry // Detailed index of blocks
+	globalIDs       *sroar.Bitmap
+	globalMinID     uint64 // Global minimum ID
+	globalMaxID     uint64 // Global maximum ID
+	closed          bool
 
 	// BlockData to buffer data before writing to disk
 	pendingData *BlockData
@@ -63,13 +60,10 @@ func NewBufferedWriter(filename string, options ...BufferedWriterOption) (*Buffe
 		blockCount:      0,
 		encodingType:    EncodingRaw, // Default
 		blockSizeTarget: defaultBlockSize,
-		// blockPositions:  make([]uint64, 0),
-		// blockSizes:      make([]uint32, 0),
-		// blockStats:      make([]BlockStats, 0),
-		blockIndex:  make([]FooterEntry, 0),
-		globalIDs:   sroar.NewBitmap(),
-		closed:      false,
-		pendingData: nil,
+		blockIndex:      make([]FooterEntry, 0),
+		globalIDs:       sroar.NewBitmap(),
+		closed:          false,
+		pendingData:     nil,
 	}
 
 	// Apply options
@@ -463,29 +457,6 @@ func (bw *BufferedWriter) writeBlockHeader(buffer []byte, minID, maxID uint64, m
 		panic(fmt.Errorf("block header size mismatch: expected=%d, actual=%d",
 			blockHeaderSize, offset))
 	}
-
-	return offset
-}
-
-// writeBlockLayout writes a block layout to the provided buffer
-func (bw *BufferedWriter) writeBlockLayout(buffer []byte, idSectionSize, valueSectionSize uint32) int {
-	offset := 0
-
-	// ID section offset - always 0 relative to the section
-	binary.LittleEndian.PutUint32(buffer[offset:], 0)
-	offset += 4
-
-	// ID section size
-	binary.LittleEndian.PutUint32(buffer[offset:], idSectionSize)
-	offset += 4
-
-	// Value section offset - always the size of the ID section
-	binary.LittleEndian.PutUint32(buffer[offset:], idSectionSize)
-	offset += 4
-
-	// Value section size
-	binary.LittleEndian.PutUint32(buffer[offset:], valueSectionSize)
-	offset += 4
 
 	return offset
 }

@@ -2,16 +2,13 @@ package col
 
 // Constants for file format
 const (
-	// MagicNumberStr is the string representation of the magic number
-	MagicNumberStr = "VIBE_COL"
-
 	// Size constants
 	headerSize      = 64
 	blockHeaderSize = 96
 	blockLayoutSize = 16
 
 	// Default block size (target)
-	defaultBlockSize = 4096 * 4 // 16KB
+	defaultBlockSize = 4096 * 32 // 128KiB
 
 	// Field sizes
 	uint32Size = 4
