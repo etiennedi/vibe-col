@@ -193,8 +193,3 @@ func (bw *BufferedWriter) Add(id uint64, value int64) error {
 
 	return nil
 }
-
-// TotalBlocks returns the number of blocks written so far
-func (bw *BufferedWriter) TotalBlocks() uint64 {
-	return bw.blockCount
-}
