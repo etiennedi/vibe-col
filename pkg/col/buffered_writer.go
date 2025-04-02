@@ -105,19 +105,60 @@ func (bw *BufferedWriter) Add(id uint64, value int64) error {
 			SerializedValueSection: make([]byte, 0, 4096),
 		}
 
-		// for now pretend encoding doesn't exist TODO
-		bw.pendingData.SerializedIDSection = bw.pendingData.SerializedIDSection[:8] // always safe, we create a much larger buffer
+		// First ID  and value are	is not delta encoded, so we only need to pay
+		// attention to varint or not
+		var idEncoded []byte
+		var valueEncoded []byte
+		// if we're using varint encoding, we need to encode first to know the size
+		if bw.encodingType == EncodingVarIntID || bw.encodingType == EncodingVarIntBoth {
+			idEncoded = encodeVarInt(id)
+		} else {
+			idEncoded = make([]byte, 8)
+			binary.LittleEndian.PutUint64(idEncoded, id)
+		}
 
-		// First ID is not delta encoded
-		binary.LittleEndian.PutUint64(bw.pendingData.SerializedIDSection, id)
-		bw.pendingData.SerializedValueSection = bw.pendingData.SerializedValueSection[:8] // always safe, we create a much larger buffer
+		if bw.encodingType == EncodingVarIntValue || bw.encodingType == EncodingVarIntBoth {
+			valueEncoded = encodeSignedVarInt(value)
+		} else {
+			valueEncoded = make([]byte, 8)
+			binary.LittleEndian.PutUint64(valueEncoded, int64ToUint64(value))
+		}
 
-		// first value is not delta encoded
-		binary.LittleEndian.PutUint64(bw.pendingData.SerializedValueSection, int64ToUint64(value))
+		bw.pendingData.SerializedIDSection = bw.pendingData.SerializedIDSection[:len(idEncoded)] // always safe, we create a much larger buffer
+		copy(bw.pendingData.SerializedIDSection, idEncoded)
+		bw.pendingData.SerializedValueSection = bw.pendingData.SerializedValueSection[:len(valueEncoded)] // always safe, we create a much larger buffer
+		copy(bw.pendingData.SerializedValueSection, valueEncoded)
 
 	} else {
-		// for now pretend encoding doesn't exist TODO
-		if len(bw.pendingData.SerializedIDSection)+8 > cap(bw.pendingData.SerializedIDSection) {
+		// in case of delta encoding we need to override the id with the delta id
+		idToWrite := id
+		if bw.encodingType == EncodingDeltaID || bw.encodingType == EncodingDeltaBoth || bw.encodingType == EncodingVarIntID || bw.encodingType == EncodingVarIntBoth {
+			idToWrite = id - bw.lastID
+		}
+		// in case of delta encoding we need to override the value with the delta value
+		valueToWrite := value
+		if bw.encodingType == EncodingDeltaValue || bw.encodingType == EncodingDeltaBoth || bw.encodingType == EncodingVarIntValue || bw.encodingType == EncodingVarIntBoth {
+			valueToWrite = value - bw.lastValue
+		}
+
+		var idEncoded []byte
+		var valueEncoded []byte
+		// if we're using varint encoding, we need to encode first to know the size
+		if bw.encodingType == EncodingVarIntID || bw.encodingType == EncodingVarIntBoth {
+			idEncoded = encodeVarInt(idToWrite)
+		} else {
+			idEncoded = make([]byte, 8)
+			binary.LittleEndian.PutUint64(idEncoded, idToWrite)
+		}
+
+		if bw.encodingType == EncodingVarIntValue || bw.encodingType == EncodingVarIntBoth {
+			valueEncoded = encodeSignedVarInt(valueToWrite)
+		} else {
+			valueEncoded = make([]byte, 8)
+			binary.LittleEndian.PutUint64(valueEncoded, int64ToUint64(valueToWrite))
+		}
+
+		if len(bw.pendingData.SerializedIDSection)+len(idEncoded) > cap(bw.pendingData.SerializedIDSection) {
 			// we need to grow the slice
 			newSlice := make([]byte, len(bw.pendingData.SerializedIDSection), cap(bw.pendingData.SerializedIDSection)*2)
 			copy(newSlice, bw.pendingData.SerializedIDSection)
@@ -125,16 +166,10 @@ func (bw *BufferedWriter) Add(id uint64, value int64) error {
 		}
 
 		// we know we have enough space
-		bw.pendingData.SerializedIDSection = bw.pendingData.SerializedIDSection[:len(bw.pendingData.SerializedIDSection)+8]
+		bw.pendingData.SerializedIDSection = bw.pendingData.SerializedIDSection[:len(bw.pendingData.SerializedIDSection)+len(idEncoded)]
+		copy(bw.pendingData.SerializedIDSection[len(bw.pendingData.SerializedIDSection)-len(idEncoded):], idEncoded)
 
-		// in case of delta encoding we need to override the id with the delta id
-		idToWrite := id
-		if bw.encodingType == EncodingDeltaID || bw.encodingType == EncodingDeltaBoth || bw.encodingType == EncodingVarIntID || bw.encodingType == EncodingVarIntBoth {
-			idToWrite = id - bw.lastID
-		}
-		binary.LittleEndian.PutUint64(bw.pendingData.SerializedIDSection[len(bw.pendingData.SerializedIDSection)-8:], idToWrite)
-
-		if len(bw.pendingData.SerializedValueSection)+8 > cap(bw.pendingData.SerializedValueSection) {
+		if len(bw.pendingData.SerializedValueSection)+len(valueEncoded) > cap(bw.pendingData.SerializedValueSection) {
 			// we need to grow the slice
 			newSlice := make([]byte, len(bw.pendingData.SerializedValueSection), cap(bw.pendingData.SerializedValueSection)*2)
 			copy(newSlice, bw.pendingData.SerializedValueSection)
@@ -142,14 +177,8 @@ func (bw *BufferedWriter) Add(id uint64, value int64) error {
 		}
 
 		// we know we have enough space
-		bw.pendingData.SerializedValueSection = bw.pendingData.SerializedValueSection[:len(bw.pendingData.SerializedValueSection)+8]
-
-		// in case of delta encoding we need to override the value with the delta value
-		valueToWrite := value
-		if bw.encodingType == EncodingDeltaValue || bw.encodingType == EncodingDeltaBoth || bw.encodingType == EncodingVarIntValue || bw.encodingType == EncodingVarIntBoth {
-			valueToWrite = value - bw.lastValue
-		}
-		binary.LittleEndian.PutUint64(bw.pendingData.SerializedValueSection[len(bw.pendingData.SerializedValueSection)-8:], int64ToUint64(valueToWrite))
+		bw.pendingData.SerializedValueSection = bw.pendingData.SerializedValueSection[:len(bw.pendingData.SerializedValueSection)+len(valueEncoded)]
+		copy(bw.pendingData.SerializedValueSection[len(bw.pendingData.SerializedValueSection)-len(valueEncoded):], valueEncoded)
 
 		// Update statistics
 		if id < bw.pendingData.MinID {

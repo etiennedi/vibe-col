@@ -297,12 +297,12 @@ func TestCompareWriterImplementations(t *testing.T) {
 			values:       generateSequentialValues(0, 10),
 			encodingType: EncodingDeltaBoth,
 		},
-		// {
-		// 	name:         "VarIntEncoding",
-		// 	ids:          generateSequentialIDs(0, 10),
-		// 	values:       generateSequentialValues(0, 10),
-		// 	encodingType: EncodingVarIntBoth,
-		// },
+		{
+			name:         "VarIntEncoding",
+			ids:          generateSequentialIDs(0, 10),
+			values:       generateSequentialValues(0, 10),
+			encodingType: EncodingVarIntBoth,
+		},
 	}
 
 	for _, tt := range tests {
@@ -952,7 +952,7 @@ func generateSequentialIDs(start, count int) []uint64 {
 func generateSequentialValues(start, count int) []int64 {
 	values := make([]int64, count)
 	for i := 0; i < count; i++ {
-		values[i] = int64((start + i) * 10)
+		values[i] = int64((start + i) * 30)
 	}
 	return values
 }
