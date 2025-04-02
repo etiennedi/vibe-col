@@ -86,7 +86,7 @@ Each block is self-contained and contains:
 +-------------------+----------------+----------------------------------+
 | Field             | Size (bytes)   | Description                      |
 +-------------------+----------------+----------------------------------+
-| Block Header      | 64             | Block metadata                   |
+| Block Header      | 96             | Block metadata                   |
 | ID-Value Pairs    | Variable       | The actual data                  |
 +-------------------+----------------+----------------------------------+
 ```
@@ -108,11 +108,11 @@ Each block is self-contained and contains:
 | Uncompressed Size | 4              | Size before compression          |
 | Compressed Size   | 4              | Size after compression           |
 | Block Checksum    | 8              | CRC-64 of block data             |
-| Reserved          | 4              | Reserved for future use          |
+| Reserved          | 28             | Reserved for future use          |
 +-------------------+----------------+----------------------------------+
 ```
 
-Total block header size: 64 bytes (fixed)
+Total block header size: 96 bytes
 
 Note: For non-numeric types, the Sum field will be set to 0 or another appropriate sentinel value.
 

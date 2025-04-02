@@ -12,11 +12,11 @@ func encodeData[T any](encodingType uint32, data []T, deltaEncodeFunc func([]T) 
 
 	// First apply delta encoding if needed
 	switch encodingType {
-	case EncodingRaw, EncodingVarInt, EncodingVarIntID:
+	case EncodingRaw, EncodingVarInt, EncodingVarIntID, EncodingVarIntValue, EncodingVarIntBoth:
 		// These encoding types don't use delta encoding
 		encodedData = make([]T, len(data))
 		copy(encodedData, data)
-	case EncodingDeltaID, EncodingDeltaValue, EncodingDeltaBoth, EncodingVarIntValue, EncodingVarIntBoth:
+	case EncodingDeltaID, EncodingDeltaValue, EncodingDeltaBoth:
 		// These encoding types use delta encoding
 		encodedData = deltaEncodeFunc(data)
 	default:

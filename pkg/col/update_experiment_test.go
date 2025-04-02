@@ -175,22 +175,6 @@ func TestUpdateExperiment(t *testing.T) {
 	assert.InDelta(t, expectedAverage, mergedResult.Avg, 0.01, "Merged average should match manual calculation")
 }
 
-// Helper function to find the minimum of two int64 values
-func minInt64(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// Helper function to find the maximum of two int64 values
-func maxInt64(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // TestDenyFilterExperiment tests the deny filter functionality specifically
 func TestDenyFilterExperiment(t *testing.T) {
 	// Create a temporary file for testing

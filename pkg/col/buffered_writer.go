@@ -35,18 +35,19 @@ type BufferedWriter struct {
 	blockCount      uint64
 	encodingType    uint32
 	blockSizeTarget uint32
-	blockPositions  []uint64        // Position of each block in the file
-	blockSizes      []uint32        // Size of each block in bytes
-	blockStats      []BlockStats    // Statistics for each block
-	blockIndex      []FooterEntry   // Detailed index of blocks
-	globalIDs       map[uint64]bool // Set of all IDs in the file
-	globalMinID     uint64          // Global minimum ID
-	globalMaxID     uint64          // Global maximum ID
-	closed          bool
+	// blockPositions  []uint64        // Position of each block in the file
+	// blockSizes      []uint32        // Size of each block in bytes
+	// blockStats      []BlockStats    // Statistics for each block
+	blockIndex  []FooterEntry // Detailed index of blocks
+	globalIDs   *sroar.Bitmap
+	globalMinID uint64 // Global minimum ID
+	globalMaxID uint64 // Global maximum ID
+	closed      bool
 
-	// IDs and values that will be added to the current block at next flush
-	pendingIDs    []uint64
-	pendingValues []int64
+	// BlockData to buffer data before writing to disk
+	pendingData *BlockData
+	lastID      uint64 // for delta encoding calculation
+	lastValue   int64  // for delta encoding calculation
 }
 
 // NewBufferedWriter creates a new BufferedWriter for the given filename
@@ -62,14 +63,13 @@ func NewBufferedWriter(filename string, options ...BufferedWriterOption) (*Buffe
 		blockCount:      0,
 		encodingType:    EncodingRaw, // Default
 		blockSizeTarget: defaultBlockSize,
-		blockPositions:  make([]uint64, 0),
-		blockSizes:      make([]uint32, 0),
-		blockStats:      make([]BlockStats, 0),
-		blockIndex:      make([]FooterEntry, 0),
-		globalIDs:       make(map[uint64]bool),
-		closed:          false,
-		pendingIDs:      make([]uint64, 0),
-		pendingValues:   make([]int64, 0),
+		// blockPositions:  make([]uint64, 0),
+		// blockSizes:      make([]uint32, 0),
+		// blockStats:      make([]BlockStats, 0),
+		blockIndex:  make([]FooterEntry, 0),
+		globalIDs:   sroar.NewBitmap(),
+		closed:      false,
+		pendingData: nil,
 	}
 
 	// Apply options
@@ -92,42 +92,173 @@ func (bw *BufferedWriter) Add(id uint64, value int64) error {
 		return fmt.Errorf("writer is already closed")
 	}
 
-	bw.pendingIDs = append(bw.pendingIDs, id)
-	bw.pendingValues = append(bw.pendingValues, value)
-
-	// If we have enough pending items, flush them
-	if len(bw.pendingIDs) >= 1000 {
-		if err := bw.Flush(); err != nil {
-			return err
+	// Create a new BlockData for this single item if needed
+	if bw.pendingData == nil {
+		bw.pendingData = &BlockData{
+			MinID:                  id,
+			MaxID:                  id,
+			MinValue:               value,
+			MaxValue:               value,
+			Sum:                    value,
+			Count:                  1,
+			SerializedIDSection:    make([]byte, 0, 4096),
+			SerializedValueSection: make([]byte, 0, 4096),
 		}
+
+		// for now pretend encoding doesn't exist TODO
+		bw.pendingData.SerializedIDSection = bw.pendingData.SerializedIDSection[:8] // always safe, we create a much larger buffer
+
+		// First ID is not delta encoded
+		binary.LittleEndian.PutUint64(bw.pendingData.SerializedIDSection, id)
+		bw.pendingData.SerializedValueSection = bw.pendingData.SerializedValueSection[:8] // always safe, we create a much larger buffer
+
+		// first value is not delta encoded
+		binary.LittleEndian.PutUint64(bw.pendingData.SerializedValueSection, int64ToUint64(value))
+
+	} else {
+		// for now pretend encoding doesn't exist TODO
+		if len(bw.pendingData.SerializedIDSection)+8 > cap(bw.pendingData.SerializedIDSection) {
+			// we need to grow the slice
+			newSlice := make([]byte, len(bw.pendingData.SerializedIDSection), cap(bw.pendingData.SerializedIDSection)*2)
+			copy(newSlice, bw.pendingData.SerializedIDSection)
+			bw.pendingData.SerializedIDSection = newSlice
+		}
+
+		// we know we have enough space
+		bw.pendingData.SerializedIDSection = bw.pendingData.SerializedIDSection[:len(bw.pendingData.SerializedIDSection)+8]
+
+		// in case of delta encoding we need to override the id with the delta id
+		idToWrite := id
+		if bw.encodingType == EncodingDeltaID || bw.encodingType == EncodingDeltaBoth || bw.encodingType == EncodingVarIntID || bw.encodingType == EncodingVarIntBoth {
+			idToWrite = id - bw.lastID
+		}
+		binary.LittleEndian.PutUint64(bw.pendingData.SerializedIDSection[len(bw.pendingData.SerializedIDSection)-8:], idToWrite)
+
+		if len(bw.pendingData.SerializedValueSection)+8 > cap(bw.pendingData.SerializedValueSection) {
+			// we need to grow the slice
+			newSlice := make([]byte, len(bw.pendingData.SerializedValueSection), cap(bw.pendingData.SerializedValueSection)*2)
+			copy(newSlice, bw.pendingData.SerializedValueSection)
+			bw.pendingData.SerializedValueSection = newSlice
+		}
+
+		// we know we have enough space
+		bw.pendingData.SerializedValueSection = bw.pendingData.SerializedValueSection[:len(bw.pendingData.SerializedValueSection)+8]
+
+		// in case of delta encoding we need to override the value with the delta value
+		valueToWrite := value
+		if bw.encodingType == EncodingDeltaValue || bw.encodingType == EncodingDeltaBoth || bw.encodingType == EncodingVarIntValue || bw.encodingType == EncodingVarIntBoth {
+			valueToWrite = value - bw.lastValue
+		}
+		binary.LittleEndian.PutUint64(bw.pendingData.SerializedValueSection[len(bw.pendingData.SerializedValueSection)-8:], int64ToUint64(valueToWrite))
+
+		// Update statistics
+		if id < bw.pendingData.MinID {
+			bw.pendingData.MinID = id
+		}
+		if id > bw.pendingData.MaxID {
+			bw.pendingData.MaxID = id
+		}
+		if value < bw.pendingData.MinValue {
+			bw.pendingData.MinValue = value
+		}
+		if value > bw.pendingData.MaxValue {
+			bw.pendingData.MaxValue = value
+		}
+		bw.pendingData.Sum += value
+		bw.pendingData.Count++
 	}
+
+	bw.globalIDs.Set(id)
+	bw.lastID = id
+	bw.lastValue = value
+
+	// // If we've accumulated enough data, flush it
+	// if bw.pendingData != nil && len(bw.pendingData.IDs) >= 1000 {
+	// 	if err := bw.Flush(); err != nil {
+	// 		return err
+	// 	}
+	// }
 
 	return nil
 }
 
-// AddBatch adds multiple ID-value pairs
-func (bw *BufferedWriter) AddBatch(ids []uint64, values []int64) error {
-	if bw.closed {
-		return fmt.Errorf("writer is already closed")
-	}
+// // AddBatch adds multiple ID-value pairs
+// func (bw *BufferedWriter) AddBatch(ids []uint64, values []int64) error {
+// 	if bw.closed {
+// 		return fmt.Errorf("writer is already closed")
+// 	}
 
-	if len(ids) != len(values) {
-		return fmt.Errorf("ids and values must have the same length")
-	}
+// 	if len(ids) != len(values) {
+// 		return fmt.Errorf("ids and values must have the same length")
+// 	}
 
-	// Add to pending data
-	bw.pendingIDs = append(bw.pendingIDs, ids...)
-	bw.pendingValues = append(bw.pendingValues, values...)
+// 	if len(ids) == 0 {
+// 		return nil
+// 	}
 
-	// If we have enough pending items, flush them
-	if len(bw.pendingIDs) >= 1000 {
-		if err := bw.Flush(); err != nil {
-			return err
-		}
-	}
+// 	// Create new BlockData from this batch
+// 	minID, maxID := calculateMinMaxUint64(ids)
+// 	minValue, maxValue := calculateMinMaxInt64(values)
+// 	sum := calculateSumInt64(values)
+// 	count := uint32(len(ids))
 
-	return nil
-}
+// 	newData := &BlockData{
+// 		IDs:      make([]uint64, len(ids)),
+// 		Values:   make([]int64, len(values)),
+// 		MinID:    minID,
+// 		MaxID:    maxID,
+// 		MinValue: minValue,
+// 		MaxValue: maxValue,
+// 		Sum:      sum,
+// 		Count:    count,
+// 	}
+
+// 	// Copy the data
+// 	copy(newData.IDs, ids)
+// 	copy(newData.Values, values)
+
+// 	// If we don't have any pending data, use this batch directly
+// 	if bw.pendingData == nil {
+// 		bw.pendingData = newData
+// 	} else {
+// 		// Merge with existing pending data
+// 		bw.pendingData = bw.mergeBlockData(bw.pendingData, newData)
+// 	}
+
+// 	// If we've accumulated enough data, flush it
+// 	if len(bw.pendingData.IDs) >= 1000 {
+// 		if err := bw.Flush(); err != nil {
+// 			return err
+// 		}
+// 	}
+
+// 	return nil
+// }
+
+// // mergeBlockData merges two BlockData structures into one
+// func (bw *BufferedWriter) mergeBlockData(a, b *BlockData) *BlockData {
+// 	// Create a new BlockData with combined capacity
+// 	result := &BlockData{
+// 		IDs:    make([]uint64, 0, len(a.IDs)+len(b.IDs)),
+// 		Values: make([]int64, 0, len(a.Values)+len(b.Values)),
+// 	}
+
+// 	// Append all IDs and values
+// 	result.IDs = append(result.IDs, a.IDs...)
+// 	result.IDs = append(result.IDs, b.IDs...)
+// 	result.Values = append(result.Values, a.Values...)
+// 	result.Values = append(result.Values, b.Values...)
+
+// 	// Recalculate statistics
+// 	result.MinID = minUint64(a.MinID, b.MinID)
+// 	result.MaxID = maxUint64(a.MaxID, b.MaxID)
+// 	result.MinValue = minInt64(a.MinValue, b.MinValue)
+// 	result.MaxValue = maxInt64(a.MaxValue, b.MaxValue)
+// 	result.Sum = a.Sum + b.Sum
+// 	result.Count = a.Count + b.Count
+
+// 	return result
+// }
 
 // Flush finalizes and writes any pending data to disk
 func (bw *BufferedWriter) Flush() error {
@@ -135,11 +266,13 @@ func (bw *BufferedWriter) Flush() error {
 		return fmt.Errorf("writer is already closed")
 	}
 
-	// If we have pending data, flush it directly
-	if len(bw.pendingIDs) > 0 {
-		if err := bw.flushCurrentBlock(); err != nil {
-			return fmt.Errorf("failed to flush block: %w", err)
+	// If we have pending data, write it as a block
+	if bw.pendingData != nil && bw.pendingData.Count > 0 {
+		if err := bw.WriteBlock(bw.pendingData); err != nil {
+			return fmt.Errorf("failed to write block: %w", err)
 		}
+		// Clear pending data
+		bw.pendingData = nil
 	}
 
 	return nil
@@ -235,56 +368,11 @@ func (bw *BufferedWriter) writeHeader() error {
 	return nil
 }
 
-// prepareBlock prepares a block from the pending data
-func (bw *BufferedWriter) prepareBlock() (*BlockData, error) {
-	if len(bw.pendingIDs) == 0 {
-		return nil, fmt.Errorf("no data to prepare block from")
-	}
-
-	// Calculate statistics from original values
-	minID, maxID := calculateMinMaxUint64(bw.pendingIDs)
-	minValue, maxValue := calculateMinMaxInt64(bw.pendingValues)
-	sum := calculateSumInt64(bw.pendingValues)
-	count := uint32(len(bw.pendingIDs))
-
-	// Serialize ID section based on encoding type
-	serializedIDSection, err := bw.serializeIDSection(bw.pendingIDs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize ID section: %w", err)
-	}
-	idSectionSize := uint32(len(serializedIDSection))
-
-	// Serialize value section based on encoding type
-	serializedValueSection, err := bw.serializeValueSection(bw.pendingValues)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize value section: %w", err)
-	}
-	valueSectionSize := uint32(len(serializedValueSection))
-
-	// Calculate expected block size
-	expectedSize := uint64(blockHeaderSize + blockLayoutSize + idSectionSize + valueSectionSize)
-
-	// Create and return BlockData
-	return &BlockData{
-		IDs:                    bw.pendingIDs,
-		Values:                 bw.pendingValues,
-		MinID:                  minID,
-		MaxID:                  maxID,
-		MinValue:               minValue,
-		MaxValue:               maxValue,
-		Sum:                    sum,
-		Count:                  count,
-		IDSectionSize:          idSectionSize,
-		ValueSectionSize:       valueSectionSize,
-		SerializedIDSection:    serializedIDSection,
-		SerializedValueSection: serializedValueSection,
-		ExpectedSize:           expectedSize,
-	}, nil
-}
+// prepareBlock has been replaced by direct calculation in WriteBlock
 
 // writeBlockHeader writes a block header to the provided buffer
 func (bw *BufferedWriter) writeBlockHeader(buffer []byte, minID, maxID uint64, minValue, maxValue, sum int64, count uint32) int {
-	// The block header size should be 64 bytes total:
+	// The block header size should be 96 bytes total:
 	// - minID (8 bytes)
 	// - maxID (8 bytes)
 	// - minValue (8 bytes)
@@ -296,7 +384,7 @@ func (bw *BufferedWriter) writeBlockHeader(buffer []byte, minID, maxID uint64, m
 	// - uncompressedSize (4 bytes)
 	// - compressedSize (4 bytes)
 	// - checksum (8 bytes)
-	// - reserved (8 bytes)
+	// - reserved (28 bytes - 96-all of the above)
 
 	offset := 0
 
@@ -338,12 +426,16 @@ func (bw *BufferedWriter) writeBlockHeader(buffer []byte, minID, maxID uint64, m
 	binary.LittleEndian.PutUint64(buffer[offset:], 0)
 	offset += 8
 
-	// reserved (8 bytes)
-	binary.LittleEndian.PutUint64(buffer[offset:], 0)
-	offset += 8
+	reserved := blockHeaderSize - offset
+	// do nothing with reserved space, since we have an empty buffer
+	offset += reserved
 
-	// Return blockHeaderSize (64) rather than calculated offset
-	return blockHeaderSize
+	if offset != blockHeaderSize {
+		panic(fmt.Errorf("block header size mismatch: expected=%d, actual=%d",
+			blockHeaderSize, offset))
+	}
+
+	return offset
 }
 
 // writeBlockLayout writes a block layout to the provided buffer
@@ -369,216 +461,6 @@ func (bw *BufferedWriter) writeBlockLayout(buffer []byte, idSectionSize, valueSe
 	return offset
 }
 
-// flushCurrentBlock writes the current block to the file
-func (bw *BufferedWriter) flushCurrentBlock() error {
-	// Prepare block data
-	blockData, err := bw.prepareBlock()
-	if err != nil {
-		return err
-	}
-
-	// Debug check for section sizes
-	if len(blockData.SerializedIDSection) == 0 {
-		return fmt.Errorf("serialized ID section is empty")
-	}
-	if len(blockData.SerializedValueSection) == 0 {
-		return fmt.Errorf("serialized value section is empty")
-	}
-
-	// Validate section sizes - they must not be zero
-	if blockData.IDSectionSize == 0 {
-		// Something went wrong, force it to a valid size
-		blockData.IDSectionSize = uint32(len(blockData.SerializedIDSection))
-		if blockData.IDSectionSize == 0 {
-			// If still zero, default to 8 for a single ID
-			blockData.IDSectionSize = 8
-		}
-	}
-	if blockData.ValueSectionSize == 0 {
-		// Something went wrong, force it to a valid size
-		blockData.ValueSectionSize = uint32(len(blockData.SerializedValueSection))
-		if blockData.ValueSectionSize == 0 {
-			// If still zero, default to 8 for a single value
-			blockData.ValueSectionSize = 8
-		}
-	}
-
-	// Write block to file
-	blockOffset, err := bw.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return fmt.Errorf("failed to get file position: %w", err)
-	}
-
-	// Convert int64 values to uint64 for storage
-	minValueU64 := int64ToUint64(blockData.MinValue)
-	maxValueU64 := int64ToUint64(blockData.MaxValue)
-	sumU64 := int64ToUint64(blockData.Sum)
-
-	// Write block header
-	headerWritten := int64(0)
-	if err := binary.Write(bw.file, binary.LittleEndian, blockData.MinID); err != nil {
-		return fmt.Errorf("failed to write min ID: %w", err)
-	}
-	headerWritten += 8
-	if err := binary.Write(bw.file, binary.LittleEndian, blockData.MaxID); err != nil {
-		return fmt.Errorf("failed to write max ID: %w", err)
-	}
-	headerWritten += 8
-	if err := binary.Write(bw.file, binary.LittleEndian, minValueU64); err != nil {
-		return fmt.Errorf("failed to write min value: %w", err)
-	}
-	headerWritten += 8
-	if err := binary.Write(bw.file, binary.LittleEndian, maxValueU64); err != nil {
-		return fmt.Errorf("failed to write max value: %w", err)
-	}
-	headerWritten += 8
-	if err := binary.Write(bw.file, binary.LittleEndian, sumU64); err != nil {
-		return fmt.Errorf("failed to write sum: %w", err)
-	}
-	headerWritten += 8
-	if err := binary.Write(bw.file, binary.LittleEndian, blockData.Count); err != nil {
-		return fmt.Errorf("failed to write count: %w", err)
-	}
-	headerWritten += 4
-	if err := binary.Write(bw.file, binary.LittleEndian, bw.encodingType); err != nil {
-		return fmt.Errorf("failed to write encoding type: %w", err)
-	}
-	headerWritten += 4
-	if err := binary.Write(bw.file, binary.LittleEndian, uint32(CompressionNone)); err != nil {
-		return fmt.Errorf("failed to write compression type: %w", err)
-	}
-	headerWritten += 4
-
-	// Write uncompressed size, compressed size, and checksum
-	if err := binary.Write(bw.file, binary.LittleEndian, uint32(0)); err != nil {
-		return fmt.Errorf("failed to write uncompressed size: %w", err)
-	}
-	headerWritten += 4
-	if err := binary.Write(bw.file, binary.LittleEndian, uint32(0)); err != nil {
-		return fmt.Errorf("failed to write compressed size: %w", err)
-	}
-	headerWritten += 4
-	if err := binary.Write(bw.file, binary.LittleEndian, uint64(0)); err != nil {
-		return fmt.Errorf("failed to write checksum: %w", err)
-	}
-	headerWritten += 8
-
-	// Skip reserved bytes to make header 64 bytes
-	reserved := blockHeaderSize - headerWritten
-	if reserved > 0 {
-		if _, err := bw.file.Seek(reserved, io.SeekCurrent); err != nil {
-			return fmt.Errorf("failed to skip reserved bytes: %w", err)
-		}
-	}
-
-	// Write block layout (16 bytes)
-	// Per spec, ID section offset should be 0 and value section offset should be the ID section size
-	// This makes both sections contiguous in the file
-	idSectionOffset := uint32(0)
-	valueSectionOffset := blockData.IDSectionSize
-
-	// Debug: ensure IDSectionSize is not zero
-	if blockData.IDSectionSize == 0 {
-		blockData.IDSectionSize = 8 // Default to 8 bytes for single ID
-	}
-	if blockData.ValueSectionSize == 0 {
-		blockData.ValueSectionSize = 8 // Default to 8 bytes for single value
-	}
-
-	if err := binary.Write(bw.file, binary.LittleEndian, idSectionOffset); err != nil {
-		return fmt.Errorf("failed to write ID section offset: %w", err)
-	}
-	if err := binary.Write(bw.file, binary.LittleEndian, blockData.IDSectionSize); err != nil {
-		return fmt.Errorf("failed to write ID section size: %w", err)
-	}
-	if err := binary.Write(bw.file, binary.LittleEndian, valueSectionOffset); err != nil {
-		return fmt.Errorf("failed to write value section offset: %w", err)
-	}
-	if err := binary.Write(bw.file, binary.LittleEndian, blockData.ValueSectionSize); err != nil {
-		return fmt.Errorf("failed to write value section size: %w", err)
-	}
-
-	// Create default ID section if needed
-	if len(blockData.SerializedIDSection) == 0 {
-		// Create a default section with the first ID
-		defaultID := make([]byte, 8)
-		binary.LittleEndian.PutUint64(defaultID, blockData.IDs[0])
-		blockData.SerializedIDSection = defaultID
-	}
-
-	// Create default value section if needed
-	if len(blockData.SerializedValueSection) == 0 {
-		// Create a default section with the first value
-		defaultValue := make([]byte, 8)
-		binary.LittleEndian.PutUint64(defaultValue, int64ToUint64(blockData.Values[0]))
-		blockData.SerializedValueSection = defaultValue
-	}
-
-	// Write ID section
-	if _, err := bw.file.Write(blockData.SerializedIDSection); err != nil {
-		return fmt.Errorf("failed to write ID section: %w", err)
-	}
-
-	// Write value section
-	if _, err := bw.file.Write(blockData.SerializedValueSection); err != nil {
-		return fmt.Errorf("failed to write value section: %w", err)
-	}
-
-	// Get current position to calculate block size
-	currentPos, err := bw.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return fmt.Errorf("failed to get current position: %w", err)
-	}
-	blockSize := uint32(currentPos - blockOffset)
-
-	// Record block in the block index
-	entry := NewFooterEntry(
-		uint64(blockOffset),
-		blockSize,
-		blockData.MinID, blockData.MaxID,
-		blockData.MinValue, blockData.MaxValue,
-		blockData.Sum, blockData.Count,
-	)
-	bw.blockIndex = append(bw.blockIndex, entry)
-	bw.blockPositions = append(bw.blockPositions, uint64(blockOffset))
-	bw.blockSizes = append(bw.blockSizes, blockSize)
-	bw.blockStats = append(bw.blockStats, BlockStats{
-		MinID:    blockData.MinID,
-		MaxID:    blockData.MaxID,
-		MinValue: blockData.MinValue,
-		MaxValue: blockData.MaxValue,
-		Sum:      blockData.Sum,
-		Count:    blockData.Count,
-	})
-
-	// Update global statistics
-	if len(bw.blockIndex) == 1 {
-		bw.globalMinID = blockData.MinID
-		bw.globalMaxID = blockData.MaxID
-	} else {
-		if blockData.MinID < bw.globalMinID {
-			bw.globalMinID = blockData.MinID
-		}
-		if blockData.MaxID > bw.globalMaxID {
-			bw.globalMaxID = blockData.MaxID
-		}
-	}
-
-	// Remember all IDs in this block for global bitmap
-	for _, id := range bw.pendingIDs {
-		bw.globalIDs[id] = true
-	}
-
-	// Increment block count
-	bw.blockCount++
-
-	// Clear the pending data
-	bw.pendingIDs = bw.pendingIDs[:0]
-	bw.pendingValues = bw.pendingValues[:0]
-
-	return nil
-}
-
 // finalize writes the footer and updates the header
 func (bw *BufferedWriter) finalize() error {
 	// Write the global ID bitmap
@@ -587,19 +469,32 @@ func (bw *BufferedWriter) finalize() error {
 		return fmt.Errorf("failed to write global ID bitmap: %w", err)
 	}
 
-	// Get current position - start of footer
+	// Get current position - this is where the footer will start
 	footerStart, err := bw.file.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return fmt.Errorf("failed to get file position: %w", err)
 	}
 
-	// Write block index count - create at least one entry for empty files
-	blockCount := int(bw.blockCount)
+	// Add padding if needed to align to page boundary
+	padding := calculatePadding(footerStart, PageSize)
+	if padding > 0 {
+		// Create padding buffer filled with zeros
+		paddingBuf := make([]byte, padding)
+		if _, err := bw.file.Write(paddingBuf); err != nil {
+			return fmt.Errorf("failed to write padding bytes: %w", err)
+		}
+		// Update footer start position after padding
+		footerStart += padding
+	}
+
+	// Write block index count
+	blockCount := uint32(len(bw.blockIndex))
 	if blockCount == 0 {
+		// Create a dummy entry for empty files
 		blockCount = 1
 	}
 
-	if err := binary.Write(bw.file, binary.LittleEndian, uint32(blockCount)); err != nil {
+	if err := binary.Write(bw.file, binary.LittleEndian, blockCount); err != nil {
 		return fmt.Errorf("failed to write block index count: %w", err)
 	}
 
@@ -607,23 +502,23 @@ func (bw *BufferedWriter) finalize() error {
 	if len(bw.blockIndex) > 0 {
 		// Write actual block entries
 		for _, entry := range bw.blockIndex {
+			// Verify that the entry is the correct size before writing
+			entryStart, _ := bw.file.Seek(0, io.SeekCurrent)
+
 			if err := binary.Write(bw.file, binary.LittleEndian, entry); err != nil {
 				return fmt.Errorf("failed to write footer entry: %w", err)
 			}
+
+			entryEnd, _ := bw.file.Seek(0, io.SeekCurrent)
+			entrySize := entryEnd - entryStart
+
+			// Each footer entry should be 56 bytes (struct FooterEntry)
+			if entrySize != 56 {
+				return fmt.Errorf("footer entry size mismatch: expected=56, actual=%d", entrySize)
+			}
 		}
 	} else {
-		// Create a dummy entry for empty files
-		dummyEntry := NewFooterEntry(
-			64,     // Header size
-			80,     // Minimal block size
-			42, 42, // Min/max ID
-			123, 123, // Min/max value
-			123, 1, // Sum and count
-		)
-
-		if err := binary.Write(bw.file, binary.LittleEndian, dummyEntry); err != nil {
-			return fmt.Errorf("failed to write dummy footer entry: %w", err)
-		}
+		return fmt.Errorf("no block index entries to write")
 	}
 
 	// Get current position - end of footer content
@@ -705,14 +600,8 @@ func (bw *BufferedWriter) writeGlobalIDBitmap() (uint64, uint64, error) {
 		return 0, 0, fmt.Errorf("failed to get bitmap offset: %w", err)
 	}
 
-	// Convert our map of IDs to a bitmap
-	bitmap := sroar.NewBitmap()
-	for id := range bw.globalIDs {
-		bitmap.Set(id)
-	}
-
 	// Serialize bitmap
-	bitmapData := bitmap.ToBuffer()
+	bitmapData := bw.globalIDs.ToBuffer()
 	bitmapSize := uint32(len(bitmapData))
 
 	// Write the bitmap size
@@ -876,150 +765,157 @@ func (bw *BufferedWriter) encodeValues(values []int64) ([]int64, [][]byte, uint3
 
 // WriteBlock writes a block of ID-value pairs with alternative implementation
 // that follows the exact format used in the TestCreateBasicColumnFile test
-func (bw *BufferedWriter) WriteBlock(ids []uint64, values []int64) error {
+func (bw *BufferedWriter) WriteBlock(blockData *BlockData) error {
 	if bw.closed {
 		return fmt.Errorf("writer is already closed")
 	}
 
-	if len(ids) == 0 || len(values) == 0 {
-		return fmt.Errorf("cannot write empty block")
-	}
+	// everything from here on is almost an exact copy of
+	// Writer.writeBlockInternal. This can be unified TODO
 
-	if len(ids) != len(values) {
-		return fmt.Errorf("ids and values must have the same length")
-	}
-
-	// Calculate statistics from original values
-	minID, maxID := calculateMinMaxUint64(ids)
-	minValue, maxValue := calculateMinMaxInt64(values)
-	sum := calculateSumInt64(values)
-	count := uint32(len(ids))
-
-	// Record block start position
-	blockStartPos, err := bw.file.Seek(0, io.SeekCurrent)
+	// Write block header (64 bytes)
+	blockStart, err := bw.file.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return fmt.Errorf("failed to get block start position: %w", err)
 	}
 
-	// Write block header (64 bytes)
-	blockHeader := make([]byte, 64)
-	// MinID (8 bytes)
-	binary.LittleEndian.PutUint64(blockHeader[0:], minID)
-	// MaxID (8 bytes)
-	binary.LittleEndian.PutUint64(blockHeader[8:], maxID)
-	// MinValue (8 bytes) - int64 value as uint64
-	binary.LittleEndian.PutUint64(blockHeader[16:], int64ToUint64(minValue))
-	// MaxValue (8 bytes) - int64 value as uint64
-	binary.LittleEndian.PutUint64(blockHeader[24:], int64ToUint64(maxValue))
-	// Sum (8 bytes) - int64 value as uint64
-	binary.LittleEndian.PutUint64(blockHeader[32:], int64ToUint64(sum))
-	// Count (4 bytes)
-	binary.LittleEndian.PutUint32(blockHeader[40:], count)
-	// EncodingType (4 bytes)
-	binary.LittleEndian.PutUint32(blockHeader[44:], bw.encodingType)
-	// CompressionType (4 bytes)
-	binary.LittleEndian.PutUint32(blockHeader[48:], 0)
-	// UncompressedSize (4 bytes)
-	binary.LittleEndian.PutUint32(blockHeader[52:], 0)
-	// CompressedSize (4 bytes)
-	binary.LittleEndian.PutUint32(blockHeader[56:], 0)
-	// Checksum (8 bytes)
-	binary.LittleEndian.PutUint64(blockHeader[56:], 0)
-	// Write the block header
-	_, err = bw.file.Write(blockHeader)
-	if err != nil {
+	// Convert int64 values to uint64 for storage
+
+	// Write block header
+	headerBuf := make([]byte, blockHeaderSize)
+	n := bw.writeBlockHeader(headerBuf, blockData.MinID, blockData.MaxID,
+		blockData.MinValue, blockData.MaxValue, blockData.Sum, blockData.Count)
+
+	if n != len(headerBuf) {
+		return fmt.Errorf("block header size mismatch: expected=%d, actual=%d",
+			len(headerBuf), n)
+	}
+	headerWritten := int64(0)
+	if n, err := bw.file.Write(headerBuf); err != nil {
 		return fmt.Errorf("failed to write block header: %w", err)
+	} else {
+		headerWritten += int64(n)
 	}
 
-	// Serialize ID section
-	serializedIDs, err := bw.serializeIDSection(ids)
-	if err != nil {
-		return fmt.Errorf("failed to serialize ID section: %w", err)
-	}
-	idSectionSize := uint32(len(serializedIDs))
+	blockData.IDSectionSize = uint32(len(blockData.SerializedIDSection))
+	blockData.ValueSectionSize = uint32(len(blockData.SerializedValueSection))
 
-	// Serialize value section
-	serializedValues, err := bw.serializeValueSection(values)
-	if err != nil {
-		return fmt.Errorf("failed to serialize value section: %w", err)
+	// Validate section sizes
+	if blockData.IDSectionSize == 0 {
+		return fmt.Errorf("ID section size is 0, which is invalid. count=%d",
+			blockData.Count)
 	}
-	valueSectionSize := uint32(len(serializedValues))
 
-	// Write block layout (16 bytes)
-	blockLayout := make([]byte, 16)
-	// IDSectionOffset (4 bytes)
-	binary.LittleEndian.PutUint32(blockLayout[0:], 0)
-	// IDSectionSize (4 bytes)
-	binary.LittleEndian.PutUint32(blockLayout[4:], idSectionSize)
-	// ValueSectionOffset (4 bytes)
-	binary.LittleEndian.PutUint32(blockLayout[8:], idSectionSize)
-	// ValueSectionSize (4 bytes)
-	binary.LittleEndian.PutUint32(blockLayout[12:], valueSectionSize)
-	// Write the block layout
-	_, err = bw.file.Write(blockLayout)
+	if blockData.ValueSectionSize == 0 {
+		return fmt.Errorf("Value section size is 0, which is invalid. count=%d",
+			blockData.Count)
+	}
+
+	// Per spec section 4.2:
+	// - ID section comes first in the data section
+	// - Value section follows the ID section
+	// The offsets are relative to the end of the block header (after the 16-byte layout section)
+	idSectionOffset := uint32(0)
+	valueSectionOffset := blockData.IDSectionSize
+
+	// Create a layout buffer and fill it
+	layoutBuf := make([]byte, 16)
+	binary.LittleEndian.PutUint32(layoutBuf[0:4], idSectionOffset)
+	binary.LittleEndian.PutUint32(layoutBuf[4:8], blockData.IDSectionSize)
+	binary.LittleEndian.PutUint32(layoutBuf[8:12], valueSectionOffset)
+	binary.LittleEndian.PutUint32(layoutBuf[12:16], blockData.ValueSectionSize)
+
+	// Write the layout buffer to file
+	bytesWritten, err := bw.file.Write(layoutBuf)
 	if err != nil {
 		return fmt.Errorf("failed to write block layout: %w", err)
 	}
+	if bytesWritten != 16 {
+		return fmt.Errorf("failed to write block layout: wrote %d bytes, expected 16", bytesWritten)
+	}
 
-	// Write ID section
-	_, err = bw.file.Write(serializedIDs)
+	// Start of data section - this position is important for checksum calculation
+	// when that feature is implemented
+	dataSectionStart, err := bw.file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return fmt.Errorf("failed to get data section position: %w", err)
+	}
+	_ = dataSectionStart // Unused for now
+
+	// Write ID section directly from pre-serialized data
+	actualIdSectionSize, err := bw.file.Write(blockData.SerializedIDSection)
 	if err != nil {
 		return fmt.Errorf("failed to write ID section: %w", err)
 	}
 
-	// Write value section
-	_, err = bw.file.Write(serializedValues)
+	// Verify ID section size
+	if uint32(actualIdSectionSize) != blockData.IDSectionSize {
+		return fmt.Errorf("ID section size mismatch: expected=%d, actual=%d",
+			blockData.IDSectionSize, actualIdSectionSize)
+	}
+
+	// Write Value section directly from pre-serialized data
+	actualValueSectionSize, err := bw.file.Write(blockData.SerializedValueSection)
 	if err != nil {
 		return fmt.Errorf("failed to write value section: %w", err)
 	}
 
-	// Remember block size for footer
-	blockEndPos, err := bw.file.Seek(0, io.SeekCurrent)
+	// Verify value section size
+	if uint32(actualValueSectionSize) != blockData.ValueSectionSize {
+		return fmt.Errorf("value section size mismatch: expected=%d, actual=%d",
+			blockData.ValueSectionSize, actualValueSectionSize)
+	}
+
+	// Get end position to calculate block size
+	blockEnd, err := bw.file.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return fmt.Errorf("failed to get block end position: %w", err)
 	}
-	blockSize := uint32(blockEndPos - blockStartPos)
 
-	// Record block in the index
-	entry := NewFooterEntry(
-		uint64(blockStartPos),
-		blockSize,
-		minID, maxID,
-		minValue, maxValue,
-		sum, count,
-	)
-	bw.blockIndex = append(bw.blockIndex, entry)
-	bw.blockPositions = append(bw.blockPositions, uint64(blockStartPos))
-	bw.blockSizes = append(bw.blockSizes, blockSize)
-	bw.blockStats = append(bw.blockStats, BlockStats{
-		MinID:    minID,
-		MaxID:    maxID,
-		MinValue: minValue,
-		MaxValue: maxValue,
-		Sum:      sum,
-		Count:    count,
+	// Calculate actual block size
+	blockSize := uint64(blockEnd - blockStart)
+
+	// Add padding if needed to align to page boundary
+	padding := calculatePadding(blockEnd, PageSize)
+	if padding > 0 {
+		// Create padding buffer filled with zeros
+		paddingBuf := make([]byte, padding)
+
+		// Write padding bytes
+		_, err := bw.file.Write(paddingBuf)
+		if err != nil {
+			return fmt.Errorf("failed to write padding bytes: %w", err)
+		}
+
+		// Update block end position and size after padding
+		blockEnd += padding
+		blockSize += uint64(padding)
+	}
+
+	// Verify block size calculation (only for the actual data, excluding padding)
+	expectedBlockSize := blockHeaderSize + blockLayoutSize + uint64(blockData.IDSectionSize) + uint64(blockData.ValueSectionSize)
+	blockSizeDifference := (blockSize - uint64(padding)) - expectedBlockSize
+	if blockSizeDifference != 0 {
+		return fmt.Errorf("block size mismatch: expected=%d, actual=%d, diff=%d",
+			expectedBlockSize, blockSize-uint64(padding), blockSizeDifference)
+	}
+
+	// Store block statistics for footer
+	bw.blockIndex = append(bw.blockIndex, FooterEntry{
+		MinID:       blockData.MinID,
+		MaxID:       blockData.MaxID,
+		MinValue:    int64ToUint64(blockData.MinValue),
+		MaxValue:    int64ToUint64(blockData.MaxValue),
+		Sum:         int64ToUint64(blockData.Sum),
+		Count:       blockData.Count,
+		BlockOffset: uint64(blockStart),
+		BlockSize:   uint32(blockSize),
 	})
 
-	// Update global statistics
-	if len(bw.blockIndex) == 1 {
-		bw.globalMinID = minID
-		bw.globalMaxID = maxID
-	} else {
-		if minID < bw.globalMinID {
-			bw.globalMinID = minID
-		}
-		if maxID > bw.globalMaxID {
-			bw.globalMaxID = maxID
-		}
+	// Sync to disk to ensure data consistency
+	if err := bw.file.Sync(); err != nil {
+		return fmt.Errorf("failed to sync file: %w", err)
 	}
-
-	// Record all IDs in global bitmap
-	for _, id := range ids {
-		bw.globalIDs[id] = true
-	}
-
-	// Increment block count
-	bw.blockCount++
 
 	return nil
 }

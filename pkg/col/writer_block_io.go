@@ -17,10 +17,6 @@ func (e *BlockFullError) Error() string {
 
 // BlockData encapsulates all the data needed to write a block to disk
 type BlockData struct {
-	// Raw data
-	IDs    []uint64
-	Values []int64
-
 	// Block metadata
 	MinID    uint64
 	MaxID    uint64
@@ -76,8 +72,6 @@ func (w *Writer) PrepareBlockData(ids []uint64, values []int64) (*BlockData, err
 
 	// Create and return BlockData
 	return &BlockData{
-		IDs:                    ids,
-		Values:                 values,
 		MinID:                  minID,
 		MaxID:                  maxID,
 		MinValue:               minValue,
@@ -101,7 +95,8 @@ func (w *Writer) serializeIDSection(ids []uint64) ([]byte, error) {
 	// Apply delta encoding if needed
 	var encodedIds []uint64
 
-	if w.encodingType == EncodingDeltaID || w.encodingType == EncodingDeltaBoth {
+	if w.encodingType == EncodingDeltaID || w.encodingType == EncodingDeltaBoth ||
+		w.encodingType == EncodingVarIntID || w.encodingType == EncodingVarIntBoth {
 		// Apply delta encoding
 		encodedIds = deltaEncode(ids)
 	} else {
@@ -130,7 +125,8 @@ func (w *Writer) serializeValueSection(values []int64) ([]byte, error) {
 	// Apply delta encoding if needed
 	var encodedValues []int64
 
-	if w.encodingType == EncodingDeltaValue || w.encodingType == EncodingDeltaBoth {
+	if w.encodingType == EncodingDeltaValue || w.encodingType == EncodingDeltaBoth ||
+		w.encodingType == EncodingVarIntValue || w.encodingType == EncodingVarIntBoth {
 		// Apply delta encoding
 		encodedValues = deltaEncodeInt64(values)
 	} else {

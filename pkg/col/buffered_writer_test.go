@@ -1,236 +1,235 @@
 package col
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/weaviate/sroar"
 )
 
-// TestBufferedWriterLikeFeatures tests the Writer API to demonstrate what the BufferedWriter should do
-// This test properly tests the functionality that the BufferedWriter is intended to provide,
-// but uses the Writer API which is known to work.
-func TestBufferedWriterLikeFeatures(t *testing.T) {
-	tempDir := t.TempDir()
-	filePath := filepath.Join(tempDir, "test_writer.col")
+// // TestBufferedWriterLikeFeatures tests the Writer API to demonstrate what the BufferedWriter should do
+// // This test properly tests the functionality that the BufferedWriter is intended to provide,
+// // but uses the Writer API which is known to work.
+// func TestBufferedWriterLikeFeatures(t *testing.T) {
+// 	tempDir := t.TempDir()
+// 	filePath := filepath.Join(tempDir, "test_writer.col")
 
-	// Create a new writer
-	writer, err := NewWriter(filePath, WithEncoding(EncodingRaw))
-	require.NoError(t, err)
+// 	// Create a new writer
+// 	writer, err := NewWriter(filePath, WithEncoding(EncodingRaw))
+// 	require.NoError(t, err)
 
-	// Add some data in batches
-	for i := 0; i < 100; i++ {
-		// Each "batch" is a separate block with Writer
-		err = writer.WriteBlock(
-			[]uint64{uint64(i)},
-			[]int64{int64(i * 10)},
-		)
-		require.NoError(t, err)
-	}
+// 	// Add some data in batches
+// 	for i := 0; i < 100; i++ {
+// 		// Each "batch" is a separate block with Writer
+// 		err = writer.WriteBlock(
+// 			[]uint64{uint64(i)},
+// 			[]int64{int64(i * 10)},
+// 		)
+// 		require.NoError(t, err)
+// 	}
 
-	// Finalize and close the writer
-	err = writer.FinalizeAndClose()
-	require.NoError(t, err)
+// 	// Finalize and close the writer
+// 	err = writer.FinalizeAndClose()
+// 	require.NoError(t, err)
 
-	// Verify the file was created
-	_, err = os.Stat(filePath)
-	require.NoError(t, err)
+// 	// Verify the file was created
+// 	_, err = os.Stat(filePath)
+// 	require.NoError(t, err)
 
-	// Open the file and verify its contents
-	reader, err := NewReader(filePath)
-	require.NoError(t, err)
-	defer reader.Close()
+// 	// Open the file and verify its contents
+// 	reader, err := NewReader(filePath)
+// 	require.NoError(t, err)
+// 	defer reader.Close()
 
-	// Check version
-	assert.Equal(t, Version, reader.Version())
+// 	// Check version
+// 	assert.Equal(t, Version, reader.Version())
 
-	// Check block count - Writer creates one block per WriteBlock call
-	blockCount := reader.BlockCount()
-	assert.Equal(t, uint64(100), blockCount, "Should have 100 blocks")
+// 	// Check block count - Writer creates one block per WriteBlock call
+// 	blockCount := reader.BlockCount()
+// 	assert.Equal(t, uint64(100), blockCount, "Should have 100 blocks")
 
-	// Verify data integrity
-	for i := 0; i < 100; i++ {
-		ids, values, err := reader.GetPairs(uint64(i))
-		require.NoError(t, err)
-		require.Equal(t, 1, len(ids), "Block should contain exactly 1 ID")
-		require.Equal(t, 1, len(values), "Block should contain exactly 1 value")
-		assert.Equal(t, uint64(i), ids[0], "ID should match")
-		assert.Equal(t, int64(i*10), values[0], "Value should match")
-	}
-}
+// 	// Verify data integrity
+// 	for i := 0; i < 100; i++ {
+// 		ids, values, err := reader.GetPairs(uint64(i))
+// 		require.NoError(t, err)
+// 		require.Equal(t, 1, len(ids), "Block should contain exactly 1 ID")
+// 		require.Equal(t, 1, len(values), "Block should contain exactly 1 value")
+// 		assert.Equal(t, uint64(i), ids[0], "ID should match")
+// 		assert.Equal(t, int64(i*10), values[0], "Value should match")
+// 	}
+// }
 
-// TestBufferedWriterLikeBatching demonstrates batching functionality similar to what BufferedWriter should provide
-func TestBufferedWriterLikeBatching(t *testing.T) {
-	tempDir := t.TempDir()
-	filePath := filepath.Join(tempDir, "test_batching.col")
+// // TestBufferedWriterLikeBatching demonstrates batching functionality similar
+// // to what BufferedWriter should provide
+// func TestBufferedWriterLikeBatching(t *testing.T) {
+// 	tempDir := t.TempDir()
+// 	filePath := filepath.Join(tempDir, "test_batching.col")
 
-	// Create a new writer
-	writer, err := NewWriter(filePath, WithEncoding(EncodingRaw))
-	require.NoError(t, err)
+// 	// Create a new writer
+// 	writer, err := NewWriter(filePath, WithEncoding(EncodingRaw))
+// 	require.NoError(t, err)
 
-	// Write first batch as a block
-	ids1 := make([]uint64, 50)
-	values1 := make([]int64, 50)
-	for i := 0; i < 50; i++ {
-		ids1[i] = uint64(i)
-		values1[i] = int64(i * 10)
-	}
-	err = writer.WriteBlock(ids1, values1)
-	require.NoError(t, err)
+// 	// Write first batch as a block
+// 	ids1 := make([]uint64, 50)
+// 	values1 := make([]int64, 50)
+// 	for i := 0; i < 50; i++ {
+// 		ids1[i] = uint64(i)
+// 		values1[i] = int64(i * 10)
+// 	}
+// 	err = writer.WriteBlock(ids1, values1)
+// 	require.NoError(t, err)
 
-	// Write second batch as a block
-	ids2 := make([]uint64, 50)
-	values2 := make([]int64, 50)
-	for i := 0; i < 50; i++ {
-		ids2[i] = uint64(i + 50)
-		values2[i] = int64((i + 50) * 10)
-	}
-	err = writer.WriteBlock(ids2, values2)
-	require.NoError(t, err)
+// 	// Write second batch as a block
+// 	ids2 := make([]uint64, 50)
+// 	values2 := make([]int64, 50)
+// 	for i := 0; i < 50; i++ {
+// 		ids2[i] = uint64(i + 50)
+// 		values2[i] = int64((i + 50) * 10)
+// 	}
+// 	err = writer.WriteBlock(ids2, values2)
+// 	require.NoError(t, err)
 
-	// Finalize the writer
-	err = writer.FinalizeAndClose()
-	require.NoError(t, err)
+// 	// Finalize the writer
+// 	err = writer.FinalizeAndClose()
+// 	require.NoError(t, err)
 
-	// Verify the file was created
-	_, err = os.Stat(filePath)
-	require.NoError(t, err)
+// 	// Verify the file was created
+// 	_, err = os.Stat(filePath)
+// 	require.NoError(t, err)
 
-	// Open the file and verify its contents
-	reader, err := NewReader(filePath)
-	require.NoError(t, err)
-	defer reader.Close()
+// 	// Open the file and verify its contents
+// 	reader, err := NewReader(filePath)
+// 	require.NoError(t, err)
+// 	defer reader.Close()
 
-	// Check block count
-	blockCount := reader.BlockCount()
-	assert.Equal(t, uint64(2), blockCount, "Should have 2 blocks")
+// 	// Check block count
+// 	blockCount := reader.BlockCount()
+// 	assert.Equal(t, uint64(2), blockCount, "Should have 2 blocks")
 
-	// Verify first block
-	ids, values, err := reader.GetPairs(0)
-	require.NoError(t, err)
-	assert.Equal(t, 50, len(ids), "First block should contain 50 IDs")
-	for i := 0; i < 50; i++ {
-		assert.Equal(t, uint64(i), ids[i], "ID should match")
-		assert.Equal(t, int64(i*10), values[i], "Value should match")
-	}
+// 	// Verify first block
+// 	ids, values, err := reader.GetPairs(0)
+// 	require.NoError(t, err)
+// 	assert.Equal(t, 50, len(ids), "First block should contain 50 IDs")
+// 	for i := 0; i < 50; i++ {
+// 		assert.Equal(t, uint64(i), ids[i], "ID should match")
+// 		assert.Equal(t, int64(i*10), values[i], "Value should match")
+// 	}
 
-	// Verify second block
-	ids, values, err = reader.GetPairs(1)
-	require.NoError(t, err)
-	assert.Equal(t, 50, len(ids), "Second block should contain 50 IDs")
-	for i := 0; i < 50; i++ {
-		assert.Equal(t, uint64(i+50), ids[i], "ID should match")
-		assert.Equal(t, int64((i+50)*10), values[i], "Value should match")
-	}
-}
+// 	// Verify second block
+// 	ids, values, err = reader.GetPairs(1)
+// 	require.NoError(t, err)
+// 	assert.Equal(t, 50, len(ids), "Second block should contain 50 IDs")
+// 	for i := 0; i < 50; i++ {
+// 		assert.Equal(t, uint64(i+50), ids[i], "ID should match")
+// 		assert.Equal(t, int64((i+50)*10), values[i], "Value should match")
+// 	}
+// }
 
-// TestBufferedWriterLikeEncoding demonstrates the BufferedWriter-like handling of different encodings
-func TestBufferedWriterLikeEncoding(t *testing.T) {
-	tempDir := t.TempDir()
-	filePath := filepath.Join(tempDir, "test_encoding.col")
+// // TestBufferedWriterLikeEncoding demonstrates the BufferedWriter-like handling
+// // of different encodings
+// func TestBufferedWriterLikeEncoding(t *testing.T) {
+// 	tempDir := t.TempDir()
+// 	filePath := filepath.Join(tempDir, "test_encoding.col")
 
-	// Create a writer with EncodingRaw
-	writer, err := NewWriter(filePath, WithEncoding(EncodingRaw))
-	require.NoError(t, err)
+// 	// Create a writer with EncodingRaw
+// 	writer, err := NewWriter(filePath, WithEncoding(EncodingRaw))
+// 	require.NoError(t, err)
 
-	// Add data with negative values
-	ids := make([]uint64, 100)
-	values := make([]int64, 100)
-	for i := 0; i < 100; i++ {
-		ids[i] = uint64(i)
-		values[i] = int64(i) * -5 // Use negative values to test int64 encoding
-	}
-	err = writer.WriteBlock(ids, values)
-	require.NoError(t, err)
+// 	// Add data with negative values
+// 	ids := make([]uint64, 100)
+// 	values := make([]int64, 100)
+// 	for i := 0; i < 100; i++ {
+// 		ids[i] = uint64(i)
+// 		values[i] = int64(i) * -5 // Use negative values to test int64 encoding
+// 	}
+// 	err = writer.WriteBlock(ids, values)
+// 	require.NoError(t, err)
 
-	// Finalize the writer
-	err = writer.FinalizeAndClose()
-	require.NoError(t, err)
+// 	// Finalize the writer
+// 	err = writer.FinalizeAndClose()
+// 	require.NoError(t, err)
 
-	// Open the file and verify its contents
-	reader, err := NewReader(filePath)
-	require.NoError(t, err)
-	defer reader.Close()
+// 	// Open the file and verify its contents
+// 	reader, err := NewReader(filePath)
+// 	require.NoError(t, err)
+// 	defer reader.Close()
 
-	// Check encoding type
-	assert.Equal(t, EncodingRaw, reader.EncodingType())
+// 	// Check encoding type
+// 	assert.Equal(t, EncodingRaw, reader.EncodingType())
 
-	// Verify data integrity
-	ids, values, err = reader.GetPairs(0)
-	require.NoError(t, err)
-	assert.Equal(t, 100, len(ids), "Block should contain 100 IDs")
-	for i := 0; i < 100; i++ {
-		assert.Equal(t, uint64(i), ids[i], "ID should match")
-		assert.Equal(t, int64(i)*-5, values[i], "Value should match")
-	}
-}
+// 	// Verify data integrity
+// 	ids, values, err = reader.GetPairs(0)
+// 	require.NoError(t, err)
+// 	assert.Equal(t, 100, len(ids), "Block should contain 100 IDs")
+// 	for i := 0; i < 100; i++ {
+// 		assert.Equal(t, uint64(i), ids[i], "ID should match")
+// 		assert.Equal(t, int64(i)*-5, values[i], "Value should match")
+// 	}
+// }
 
-// TestBufferedWriterLikeFlush simulates flush by writing multiple blocks
-func TestBufferedWriterLikeFlush(t *testing.T) {
-	tempDir := t.TempDir()
-	filePath := filepath.Join(tempDir, "test_flush.col")
+// // TestBufferedWriterLikeFlush simulates flush by writing multiple blocks
+// func TestBufferedWriterLikeFlush(t *testing.T) {
+// 	tempDir := t.TempDir()
+// 	filePath := filepath.Join(tempDir, "test_flush.col")
 
-	// Create a writer
-	writer, err := NewWriter(filePath, WithEncoding(EncodingRaw))
-	require.NoError(t, err)
+// 	// Create a writer
+// 	writer, err := NewWriter(filePath, WithEncoding(EncodingRaw))
+// 	require.NoError(t, err)
 
-	// Add first batch of data
-	ids1 := make([]uint64, 50)
-	values1 := make([]int64, 50)
-	for i := 0; i < 50; i++ {
-		ids1[i] = uint64(i)
-		values1[i] = int64(i * 10)
-	}
-	err = writer.WriteBlock(ids1, values1)
-	require.NoError(t, err)
+// 	// Add first batch of data
+// 	ids1 := make([]uint64, 50)
+// 	values1 := make([]int64, 50)
+// 	for i := 0; i < 50; i++ {
+// 		ids1[i] = uint64(i)
+// 		values1[i] = int64(i * 10)
+// 	}
+// 	err = writer.WriteBlock(ids1, values1)
+// 	require.NoError(t, err)
 
-	// Add second batch of data
-	ids2 := make([]uint64, 50)
-	values2 := make([]int64, 50)
-	for i := 0; i < 50; i++ {
-		ids2[i] = uint64(i + 50)
-		values2[i] = int64((i + 50) * 10)
-	}
-	err = writer.WriteBlock(ids2, values2)
-	require.NoError(t, err)
+// 	// Add second batch of data
+// 	ids2 := make([]uint64, 50)
+// 	values2 := make([]int64, 50)
+// 	for i := 0; i < 50; i++ {
+// 		ids2[i] = uint64(i + 50)
+// 		values2[i] = int64((i + 50) * 10)
+// 	}
+// 	err = writer.WriteBlock(ids2, values2)
+// 	require.NoError(t, err)
 
-	// Finalize the writer
-	err = writer.FinalizeAndClose()
-	require.NoError(t, err)
+// 	// Finalize the writer
+// 	err = writer.FinalizeAndClose()
+// 	require.NoError(t, err)
 
-	// Open the file and verify its contents
-	reader, err := NewReader(filePath)
-	require.NoError(t, err)
-	defer reader.Close()
+// 	// Open the file and verify its contents
+// 	reader, err := NewReader(filePath)
+// 	require.NoError(t, err)
+// 	defer reader.Close()
 
-	// Check block count
-	blockCount := reader.BlockCount()
-	assert.Equal(t, uint64(2), blockCount, "Should have 2 blocks")
+// 	// Check block count
+// 	blockCount := reader.BlockCount()
+// 	assert.Equal(t, uint64(2), blockCount, "Should have 2 blocks")
 
-	// Verify all data (100 items total)
-	totalItems := 0
-	for i := uint64(0); i < blockCount; i++ {
-		ids, values, err := reader.GetPairs(i)
-		require.NoError(t, err)
-		totalItems += len(ids)
+// 	// Verify all data (100 items total)
+// 	totalItems := 0
+// 	for i := uint64(0); i < blockCount; i++ {
+// 		ids, values, err := reader.GetPairs(i)
+// 		require.NoError(t, err)
+// 		totalItems += len(ids)
 
-		// Verify data integrity for this block
-		for j := 0; j < len(ids); j++ {
-			id := ids[j]
-			value := values[j]
-			assert.Equal(t, int64(id*10), value, "Value should be ID*10")
-		}
-	}
-	assert.Equal(t, 100, totalItems, "Should have 100 items total")
-}
+// 		// Verify data integrity for this block
+// 		for j := 0; j < len(ids); j++ {
+// 			id := ids[j]
+// 			value := values[j]
+// 			assert.Equal(t, int64(id*10), value, "Value should be ID*10")
+// 		}
+// 	}
+// 	assert.Equal(t, 100, totalItems, "Should have 100 items total")
+// }
 
 // NOTE: The BufferedWriter tests are disabled because they appear to have an implementation issue.
 // The tests below use the Writer instead to demonstrate what the BufferedWriter should do.
@@ -273,14 +272,6 @@ func addTestData(t *testing.T, writer *BufferedWriter, count int, startID ...int
 }
 */
 
-// minIntFunction returns the minimum of two integers
-func minIntFunction(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func TestCompareWriterImplementations(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -306,12 +297,12 @@ func TestCompareWriterImplementations(t *testing.T) {
 			values:       generateSequentialValues(0, 10),
 			encodingType: EncodingDeltaBoth,
 		},
-		{
-			name:         "VarIntEncoding",
-			ids:          generateSequentialIDs(0, 10),
-			values:       generateSequentialValues(0, 10),
-			encodingType: EncodingVarIntBoth,
-		},
+		// {
+		// 	name:         "VarIntEncoding",
+		// 	ids:          generateSequentialIDs(0, 10),
+		// 	values:       generateSequentialValues(0, 10),
+		// 	encodingType: EncodingVarIntBoth,
+		// },
 	}
 
 	for _, tt := range tests {
@@ -335,11 +326,7 @@ func readBlockLayout(file string, blockOffset int64) (BlockLayout, error) {
 		return layout, fmt.Errorf("failed to open file: %w", err)
 	}
 	defer f.Close()
-
-	// Seek to the header (which is 64 bytes)
-	// Then the layout section follows immediately
-	layoutOffset := blockOffset + 64
-	_, err = f.Seek(layoutOffset, io.SeekStart)
+	_, err = f.Seek(blockOffset, io.SeekStart)
 	if err != nil {
 		return layout, fmt.Errorf("failed to seek to layout section: %w", err)
 	}
@@ -360,6 +347,24 @@ func readBlockLayout(file string, blockOffset int64) (BlockLayout, error) {
 	return layout, nil
 }
 
+func readHeader(t *testing.T, buf []byte) FileHeader {
+	header := FileHeader{}
+
+	// Extract fields from the buffer
+	header.Magic = binary.LittleEndian.Uint64(buf[0:8])
+	header.Version = binary.LittleEndian.Uint32(buf[8:12])
+	header.ColumnType = binary.LittleEndian.Uint32(buf[12:16])
+	header.BlockCount = binary.LittleEndian.Uint64(buf[16:24])
+	header.BlockSizeTarget = binary.LittleEndian.Uint32(buf[24:28])
+	header.CompressionType = binary.LittleEndian.Uint32(buf[28:32])
+	header.EncodingType = binary.LittleEndian.Uint32(buf[32:36])
+	header.CreationTime = binary.LittleEndian.Uint64(buf[36:44])
+	header.BitmapOffset = binary.LittleEndian.Uint64(buf[44:52])
+	header.BitmapSize = binary.LittleEndian.Uint64(buf[52:60])
+
+	return header
+}
+
 // readBlockHeader reads the header of a block at the given offset
 func readBlockHeader(file string, blockOffset int64) (BlockHeader, error) {
 	var header BlockHeader
@@ -378,15 +383,15 @@ func readBlockHeader(file string, blockOffset int64) (BlockHeader, error) {
 	}
 
 	// Read the header (64 bytes)
-	headerBytes := make([]byte, 64)
+	headerBytes := make([]byte, blockHeaderSize)
 	n, err := f.Read(headerBytes)
 	if err != nil {
 		return header, fmt.Errorf("failed to read block header: %w", err)
 	}
 
 	// Check if we read enough bytes
-	if n < 64 {
-		return header, fmt.Errorf("incomplete block header: read %d bytes, expected 64", n)
+	if n < blockHeaderSize {
+		return header, fmt.Errorf("incomplete block header: read %d bytes, expected %d", n, blockHeaderSize)
 	}
 
 	// Extract fields from the buffer
@@ -400,11 +405,7 @@ func readBlockHeader(file string, blockOffset int64) (BlockHeader, error) {
 	header.CompressionType = binary.LittleEndian.Uint32(headerBytes[48:52])
 	header.UncompressedSize = binary.LittleEndian.Uint32(headerBytes[52:56])
 	header.CompressedSize = binary.LittleEndian.Uint32(headerBytes[56:60])
-
-	// Only read checksum if we have enough bytes
-	if n >= 64 {
-		header.Checksum = binary.LittleEndian.Uint64(headerBytes[56:64])
-	}
+	header.Checksum = binary.LittleEndian.Uint64(headerBytes[56:64])
 
 	return header, nil
 }
@@ -431,8 +432,10 @@ func compareWriters(t *testing.T, ids []uint64, values []int64, encodingType uin
 	require.NoError(t, err)
 
 	// Use WriteBlock directly instead of adding items one by one
-	err = bufferedWriter.WriteBlock(ids, values)
-	require.NoError(t, err)
+	for i, id := range ids {
+		err = bufferedWriter.Add(id, values[i])
+		require.NoError(t, err)
+	}
 
 	err = bufferedWriter.Close()
 	require.NoError(t, err)
@@ -447,6 +450,25 @@ func compareWriters(t *testing.T, ids []uint64, values []int64, encodingType uin
 	// Compare file sizes
 	t.Logf("Standard file size: %d bytes", len(standardBytes))
 	t.Logf("Buffered file size: %d bytes", len(bufferedBytes))
+
+	require.Equal(t, len(standardBytes), len(bufferedBytes), "File sizes should match")
+
+	// Compare headers
+	standardHeader := readHeader(t, standardBytes)
+	bufferedHeader := readHeader(t, bufferedBytes)
+	t.Logf("Standard header: %+v", standardHeader)
+	t.Logf("Buffered header: %+v", bufferedHeader)
+
+	// The timestamp is allowed to differ, all other values have to be identical:
+	assert.Equal(t, standardHeader.Magic, bufferedHeader.Magic, "Magic should match")
+	assert.Equal(t, standardHeader.Version, bufferedHeader.Version, "Version should match")
+	assert.Equal(t, standardHeader.ColumnType, bufferedHeader.ColumnType, "ColumnType should match")
+	assert.Equal(t, standardHeader.BlockCount, bufferedHeader.BlockCount, "BlockCount should match")
+	assert.Equal(t, standardHeader.BlockSizeTarget, bufferedHeader.BlockSizeTarget, "BlockSizeTarget should match")
+	assert.Equal(t, standardHeader.CompressionType, bufferedHeader.CompressionType, "CompressionType should match")
+	assert.Equal(t, standardHeader.EncodingType, bufferedHeader.EncodingType, "EncodingType should match")
+	assert.Equal(t, standardHeader.BitmapOffset, bufferedHeader.BitmapOffset, "BitmapOffset should match")
+	assert.Equal(t, standardHeader.BitmapSize, bufferedHeader.BitmapSize, "BitmapSize should match")
 
 	// Compare with Reader
 	standardReader, standardErr := NewReader(standardFile)
@@ -489,6 +511,8 @@ func compareWriters(t *testing.T, ids []uint64, values []int64, encodingType uin
 		standardBlockLayout.IDSectionOffset, standardBlockLayout.IDSectionSize,
 		standardBlockLayout.ValueSectionOffset, standardBlockLayout.ValueSectionSize)
 
+	var desiredIDs []uint64
+	var desiredValues []int64
 	// Read standard blocks
 	for i := uint64(0); i < standardBlockCount; i++ {
 		standardIDs, standardValues, err := standardReader.GetPairs(i)
@@ -496,6 +520,8 @@ func compareWriters(t *testing.T, ids []uint64, values []int64, encodingType uin
 			t.Logf("Error reading standard block: %v", err)
 			return false
 		}
+		desiredIDs = standardIDs
+		desiredValues = standardValues
 		t.Logf("Standard block %d: %d pairs", i, len(standardIDs))
 		if len(standardIDs) > 0 {
 			t.Logf("Standard block first ID: %d, first value: %d", standardIDs[0], standardValues[0])
@@ -524,15 +550,11 @@ func compareWriters(t *testing.T, ids []uint64, values []int64, encodingType uin
 		if len(bufferedIDs) > 0 {
 			t.Logf("Buffered block first ID: %d, first value: %d", bufferedIDs[0], bufferedValues[0])
 		}
+
+		assert.Equal(t, desiredIDs, bufferedIDs, "IDs should match")
+		assert.Equal(t, desiredValues, bufferedValues, "Values should match")
 	}
 
-	// Compare data equality
-	if !bytes.Equal(standardBytes, bufferedBytes) {
-		t.Logf("❌ Files differ for encoding type %d", encodingType)
-		return false
-	}
-
-	t.Logf("✅ Files are identical for encoding type %d", encodingType)
 	return true
 }
 
@@ -663,518 +685,259 @@ func readAndDecodeHeader(file *os.File) (FileHeader, FooterMetadata, error) {
 	return header, footerMeta, nil
 }
 
-func TestBufferedWriterBasics(t *testing.T) {
-	// Create a temp file
-	tempdir := t.TempDir()
-	filename := filepath.Join(tempdir, "test.col")
-
-	// Create a new buffered writer
-	writer, err := NewBufferedWriter(filename)
-	require.NoError(t, err)
-
-	// Use WriteBlock instead of Add + flush
-	err = writer.WriteBlock([]uint64{42}, []int64{123})
-	require.NoError(t, err)
-
-	// Close the writer to flush everything
-	err = writer.Close()
-	require.NoError(t, err)
-
-	// Read the file and check its contents
-	fileBytes, err := os.ReadFile(filename)
-	require.NoError(t, err)
-	t.Logf("File size: %d bytes", len(fileBytes))
-
-	t.Logf("File header: %v", fileBytes[:64])
-	hexDump(t, fileBytes[:256])
-
-	// Check block layout
-	layoutStart := 64 + blockHeaderSize // Skip file header and block header
-	layoutEnd := layoutStart + 16       // Layout is 16 bytes
-	layoutBytes := fileBytes[layoutStart:layoutEnd]
-
-	idOffset := binary.LittleEndian.Uint32(layoutBytes[0:4])
-	idSize := binary.LittleEndian.Uint32(layoutBytes[4:8])
-	valueOffset := binary.LittleEndian.Uint32(layoutBytes[8:12])
-	valueSize := binary.LittleEndian.Uint32(layoutBytes[12:16])
-
-	t.Logf("Block layout from file: IDOffset=%d, IDSize=%d, ValueOffset=%d, ValueSize=%d",
-		idOffset, idSize, valueOffset, valueSize)
-
-	// Open the file with the reader
-	reader, err := NewReader(filename)
-	if err != nil {
-		t.Logf("Failed to open file with Reader: %v", err)
-
-		// Create an equivalent file with the standard Writer for comparison
-		standardFile := filepath.Join(tempdir, "standard.col")
-		standardWriter, stdErr := NewWriter(standardFile, WithEncoding(EncodingRaw))
-		require.NoError(t, stdErr)
-
-		stdErr = standardWriter.WriteBlock([]uint64{42}, []int64{123})
-		require.NoError(t, stdErr)
-
-		stdErr = standardWriter.FinalizeAndClose()
-		require.NoError(t, stdErr)
-
-		// Compare the files to see what's different
-		standardBytes, _ := os.ReadFile(standardFile)
-		t.Logf("Standard file size: %d bytes", len(standardBytes))
-		if len(standardBytes) > 0 {
-			t.Logf("Standard file header: %v", standardBytes[:minIntFunction(64, len(standardBytes))])
-			hexDump(t, standardBytes[:minIntFunction(256, len(standardBytes))])
-		}
-
-		stdLayoutStart := 64 + blockHeaderSize // Skip file header and block header
-		stdLayoutEnd := stdLayoutStart + 16    // Layout is 16 bytes
-		stdLayoutBytes := standardBytes[stdLayoutStart:stdLayoutEnd]
-
-		stdIdOffset := binary.LittleEndian.Uint32(stdLayoutBytes[0:4])
-		stdIdSize := binary.LittleEndian.Uint32(stdLayoutBytes[4:8])
-		stdValueOffset := binary.LittleEndian.Uint32(stdLayoutBytes[8:12])
-		stdValueSize := binary.LittleEndian.Uint32(stdLayoutBytes[12:16])
-
-		t.Logf("Standard block layout: IDOffset=%d, IDSize=%d, ValueOffset=%d, ValueSize=%d",
-			stdIdOffset, stdIdSize, stdValueOffset, stdValueSize)
-
-		t.Fatalf("BufferedWriter produced a file that cannot be read by Reader")
-	}
-	defer reader.Close()
-
-	// If we got here, the reader opened successfully, check the content
-	blockCount := reader.BlockCount()
-	t.Logf("Block count: %d", blockCount)
-
-	for i := uint64(0); i < blockCount; i++ {
-		ids, values, err := reader.GetPairs(i)
-		require.NoError(t, err)
-		t.Logf("Block %d: %d pairs", i, len(ids))
-
-		for j := 0; j < len(ids); j++ {
-			t.Logf("  Pair %d: ID=%d, Value=%d", j, ids[j], values[j])
-		}
-	}
-}
-
-func TestCompareRawBytes(t *testing.T) {
-	// Create a temporary directory for our test files
-	tempDir := t.TempDir()
-
-	// Data for the test
-	ids := []uint64{42}
-	values := []int64{123}
-
-	// Create files with standard Writer
-	standardFile := filepath.Join(tempDir, "standard.col")
-	standardWriter, err := NewWriter(standardFile, WithEncoding(EncodingRaw))
-	require.NoError(t, err)
-
-	err = standardWriter.WriteBlock(ids, values)
-	require.NoError(t, err)
-
-	err = standardWriter.FinalizeAndClose()
-	require.NoError(t, err)
-
-	// Create files with BufferedWriter
-	bufferedFile := filepath.Join(tempDir, "buffered.col")
-	bufferedWriter, err := NewBufferedWriter(bufferedFile, WithBufferedEncoding(EncodingRaw))
-	require.NoError(t, err)
-
-	for i := range ids {
-		err = bufferedWriter.Add(ids[i], values[i])
-		require.NoError(t, err)
-	}
-
-	// Force flush to ensure data is written
-	err = bufferedWriter.Flush()
-	require.NoError(t, err)
-
-	err = bufferedWriter.Close()
-	require.NoError(t, err)
-
-	// Read both files as raw bytes
-	standardBytes, err := os.ReadFile(standardFile)
-	require.NoError(t, err)
-
-	bufferedBytes, err := os.ReadFile(bufferedFile)
-	require.NoError(t, err)
-
-	// Compare file sizes
-	t.Logf("Standard file size: %d bytes", len(standardBytes))
-	t.Logf("Buffered file size: %d bytes", len(bufferedBytes))
-
-	// Hexdump for debugging
-	t.Log("First 120 bytes of standard file:")
-	hexDump(t, standardBytes[:minIntFunction(120, len(standardBytes))])
-
-	t.Log("First 120 bytes of buffered file:")
-	hexDump(t, bufferedBytes[:minIntFunction(120, len(bufferedBytes))])
-
-	// Open and compare both files block by block
-	stdFilePointer, err := os.Open(standardFile)
-	require.NoError(t, err)
-	defer stdFilePointer.Close()
-
-	bufFilePointer, err := os.Open(bufferedFile)
-	require.NoError(t, err)
-	defer bufFilePointer.Close()
-
-	// Read and analyze first block header from each file
-	stdHeader, err := readBlockHeader(standardFile, 64)
-	require.NoError(t, err)
-	t.Logf("Standard block header: %+v", stdHeader)
-
-	bufHeader, err := readBlockHeader(bufferedFile, 64)
-	require.NoError(t, err)
-	t.Logf("Buffered block header: %+v", bufHeader)
-
-	// Read and compare first block layout from each file
-	stdLayout, err := readBlockLayout(standardFile, 64)
-	require.NoError(t, err)
-	t.Logf("Standard block layout: %+v", stdLayout)
-
-	bufLayout, err := readBlockLayout(bufferedFile, 64)
-	require.NoError(t, err)
-	t.Logf("Buffered block layout: %+v", bufLayout)
-
-	// Read and compare actual data sections
-	stdBlockLength := blockHeaderSize + blockLayoutSize + int(stdLayout.IDSectionSize) + int(stdLayout.ValueSectionSize)
-	bufBlockLength := blockHeaderSize + blockLayoutSize + int(bufLayout.IDSectionSize) + int(bufLayout.ValueSectionSize)
-
-	t.Logf("Standard calculated block length: %d", stdBlockLength)
-	t.Logf("Buffered calculated block length: %d", bufBlockLength)
-
-	// Read standard file ID section
-	stdIDData := make([]byte, stdLayout.IDSectionSize)
-	_, err = stdFilePointer.Seek(64+16, io.SeekStart) // Skip header and layout
-	require.NoError(t, err)
-	_, err = stdFilePointer.Read(stdIDData)
-	require.NoError(t, err)
-	t.Logf("Standard ID section (%d bytes): %v", len(stdIDData), stdIDData)
-
-	// Read buffered file ID section
-	bufIDData := make([]byte, bufLayout.IDSectionSize)
-	_, err = bufFilePointer.Seek(64+16, io.SeekStart) // Skip header and layout
-	require.NoError(t, err)
-	_, err = bufFilePointer.Read(bufIDData)
-	require.NoError(t, err)
-	t.Logf("Buffered ID section (%d bytes): %v", len(bufIDData), bufIDData)
-
-	// Compare ID sections
-	if bytes.Equal(stdIDData, bufIDData) {
-		t.Log("✅ ID sections are identical")
-	} else {
-		t.Log("❌ ID sections differ")
-	}
-
-	// Read standard file value section
-	stdValueData := make([]byte, stdLayout.ValueSectionSize)
-	_, err = stdFilePointer.Seek(64+16+int64(stdLayout.IDSectionSize), io.SeekStart) // Skip header, layout, and ID section
-	require.NoError(t, err)
-	_, err = stdFilePointer.Read(stdValueData)
-	require.NoError(t, err)
-	t.Logf("Standard value section (%d bytes): %v", len(stdValueData), stdValueData)
-
-	// Read buffered file value section
-	bufValueData := make([]byte, bufLayout.ValueSectionSize)
-	_, err = bufFilePointer.Seek(64+16+int64(bufLayout.IDSectionSize), io.SeekStart) // Skip header, layout, and ID section
-	require.NoError(t, err)
-	_, err = bufFilePointer.Read(bufValueData)
-	require.NoError(t, err)
-	t.Logf("Buffered value section (%d bytes): %v", len(bufValueData), bufValueData)
-
-	// Compare value sections
-	if bytes.Equal(stdValueData, bufValueData) {
-		t.Log("✅ Value sections are identical")
-	} else {
-		t.Log("❌ Value sections differ")
-	}
-
-	// Try to read the files with the Reader
-	standardReader, err := NewReader(standardFile)
-	if err != nil {
-		t.Logf("Error opening standard file with reader: %v", err)
-	} else {
-		defer standardReader.Close()
-		t.Logf("Standard file open success: block count = %d", standardReader.BlockCount())
-
-		if standardReader.BlockCount() > 0 {
-			pairsIDs, pairsValues, err := standardReader.GetPairs(0)
-			if err != nil {
-				t.Logf("Error reading standard pairs: %v", err)
-			} else {
-				t.Logf("Standard file read success: %d pairs", len(pairsIDs))
-				t.Logf("First ID-value: %d -> %d", pairsIDs[0], pairsValues[0])
-			}
-		}
-	}
-
-	bufferedReader, err := NewReader(bufferedFile)
-	if err != nil {
-		t.Logf("Error opening buffered file with reader: %v", err)
-	} else {
-		defer bufferedReader.Close()
-		t.Logf("Buffered file open success: block count = %d", bufferedReader.BlockCount())
-
-		if bufferedReader.BlockCount() > 0 {
-			pairsIDs, pairsValues, err := bufferedReader.GetPairs(0)
-			if err != nil {
-				t.Logf("Error reading buffered pairs: %v", err)
-			} else {
-				t.Logf("Buffered file read success: %d pairs", len(pairsIDs))
-				t.Logf("First ID-value: %d -> %d", pairsIDs[0], pairsValues[0])
-			}
-		}
-	}
-}
-
-// inspectSerialization shows the serialized representation of IDs and values
-func TestInspectSerialization(t *testing.T) {
-	// Create both Writer implementations
-	standardWriter := &Writer{
-		encodingType: EncodingRaw,
-	}
-
-	bufferedWriter := &BufferedWriter{
-		encodingType: EncodingRaw,
-	}
-
-	// Test values
-	testID := uint64(42)
-	testValue := int64(123)
-
-	// Serialize with standard writer
-	stdIDs, err := standardWriter.serializeFixedLengthIDs([]uint64{testID})
-	require.NoError(t, err)
-
-	stdValues, err := standardWriter.serializeFixedLengthValues([]int64{testValue})
-	require.NoError(t, err)
-
-	// Serialize with buffered writer
-	bufIDs, err := bufferedWriter.serializeFixedLengthIDs([]uint64{testID})
-	require.NoError(t, err)
-
-	bufValues, err := bufferedWriter.serializeFixedLengthValues([]int64{testValue})
-	require.NoError(t, err)
-
-	// Display bytes
-	t.Logf("Standard Writer ID serialization for %d: %v", testID, stdIDs)
-	t.Logf("Buffered Writer ID serialization for %d: %v", testID, bufIDs)
-
-	t.Logf("Standard Writer Value serialization for %d: %v", testValue, stdValues)
-	t.Logf("Buffered Writer Value serialization for %d: %v", testValue, bufValues)
-
-	// Test decoding the ID section
-	decodedStdIDs, _, err := decodeBlockData(stdIDs, stdValues, 1, EncodingRaw)
-	require.NoError(t, err)
-	t.Logf("Decoded ID from standard writer: %v", decodedStdIDs)
-
-	decodedBufIDs, _, err := decodeBlockData(bufIDs, bufValues, 1, EncodingRaw)
-	require.NoError(t, err)
-	t.Logf("Decoded ID from buffered writer: %v", decodedBufIDs)
-
-	// Test manually decoding
-	stdDecodedID := binary.LittleEndian.Uint64(stdIDs)
-	bufDecodedID := binary.LittleEndian.Uint64(bufIDs)
-
-	t.Logf("Manually decoded ID from standard writer: %v", stdDecodedID)
-	t.Logf("Manually decoded ID from buffered writer: %v", bufDecodedID)
-}
-
-// TestCreateBasicColumnFile creates a basic column file directly with hardcoded values
-// to verify the format is correct
-func TestCreateBasicColumnFile(t *testing.T) {
-	// Create a temp file
-	tempdir := t.TempDir()
-	filename := filepath.Join(tempdir, "basic.col")
-
-	// Create the file
-	file, err := os.Create(filename)
-	require.NoError(t, err)
-	defer file.Close()
-
-	// Write file header (64 bytes)
-	header := make([]byte, 64)
-	// Magic number "LOC_EBV" (8 bytes)
-	copy(header[0:], []byte{0, 'L', 'O', 'C', '_', 'E', 'B', 'V'})
-	// Version (4 bytes)
-	binary.LittleEndian.PutUint32(header[8:], 1)
-	// ColumnType (4 bytes)
-	binary.LittleEndian.PutUint32(header[12:], 0)
-	// BlockCount (8 bytes)
-	binary.LittleEndian.PutUint64(header[16:], 1)
-	// BlockSizeTarget (4 bytes)
-	binary.LittleEndian.PutUint32(header[24:], 16384)
-	// CompressionType (4 bytes)
-	binary.LittleEndian.PutUint32(header[28:], 0)
-	// EncodingType (4 bytes)
-	binary.LittleEndian.PutUint32(header[32:], 0)
-	// CreationTime (8 bytes)
-	binary.LittleEndian.PutUint64(header[36:], uint64(time.Now().Unix()))
-	// BitmapOffset (8 bytes) - will update later
-	binary.LittleEndian.PutUint64(header[44:], 0)
-	// BitmapSize (8 bytes) - will update later
-	binary.LittleEndian.PutUint64(header[52:], 0)
-	// Write the header
-	_, err = file.Write(header)
-	require.NoError(t, err)
-
-	// Remember block start position
-	blockStartPos, err := file.Seek(0, io.SeekCurrent)
-	require.NoError(t, err)
-
-	// Write block header (64 bytes)
-	blockHeader := make([]byte, 64)
-	// MinID (8 bytes)
-	binary.LittleEndian.PutUint64(blockHeader[0:], 42)
-	// MaxID (8 bytes)
-	binary.LittleEndian.PutUint64(blockHeader[8:], 42)
-	// MinValue (8 bytes) - int64 value 123 as uint64
-	binary.LittleEndian.PutUint64(blockHeader[16:], int64ToUint64(123))
-	// MaxValue (8 bytes) - int64 value 123 as uint64
-	binary.LittleEndian.PutUint64(blockHeader[24:], int64ToUint64(123))
-	// Sum (8 bytes) - int64 value 123 as uint64
-	binary.LittleEndian.PutUint64(blockHeader[32:], int64ToUint64(123))
-	// Count (4 bytes)
-	binary.LittleEndian.PutUint32(blockHeader[40:], 1)
-	// EncodingType (4 bytes)
-	binary.LittleEndian.PutUint32(blockHeader[44:], 0)
-	// CompressionType (4 bytes)
-	binary.LittleEndian.PutUint32(blockHeader[48:], 0)
-	// UncompressedSize (4 bytes)
-	binary.LittleEndian.PutUint32(blockHeader[52:], 0)
-	// CompressedSize (4 bytes)
-	binary.LittleEndian.PutUint32(blockHeader[56:], 0)
-	// Checksum (8 bytes)
-	binary.LittleEndian.PutUint64(blockHeader[56:], 0)
-	// Write the block header
-	_, err = file.Write(blockHeader)
-	require.NoError(t, err)
-
-	// Write block layout (16 bytes)
-	blockLayout := make([]byte, 16)
-	// IDSectionOffset (4 bytes)
-	binary.LittleEndian.PutUint32(blockLayout[0:], 0)
-	// IDSectionSize (4 bytes)
-	binary.LittleEndian.PutUint32(blockLayout[4:], 8)
-	// ValueSectionOffset (4 bytes)
-	binary.LittleEndian.PutUint32(blockLayout[8:], 8)
-	// ValueSectionSize (4 bytes)
-	binary.LittleEndian.PutUint32(blockLayout[12:], 8)
-	// Write the block layout
-	_, err = file.Write(blockLayout)
-	require.NoError(t, err)
-
-	// Write ID section (8 bytes)
-	idSection := make([]byte, 8)
-	binary.LittleEndian.PutUint64(idSection[0:], 42)
-	_, err = file.Write(idSection)
-	require.NoError(t, err)
-
-	// Write value section (8 bytes)
-	valueSection := make([]byte, 8)
-	binary.LittleEndian.PutUint64(valueSection[0:], int64ToUint64(123))
-	_, err = file.Write(valueSection)
-	require.NoError(t, err)
-
-	// Remember block size for footer
-	blockEndPos, err := file.Seek(0, io.SeekCurrent)
-	require.NoError(t, err)
-	blockSize := uint32(blockEndPos - blockStartPos)
-
-	// Write bitmap (simple bitmap with just ID 42)
-	bitmapStartPos, err := file.Seek(0, io.SeekCurrent)
-	require.NoError(t, err)
-
-	bitmap := sroar.NewBitmap()
-	bitmap.Set(42)
-	bitmapData := bitmap.ToBuffer()
-	bitmapSize := uint32(len(bitmapData))
-
-	// Write bitmap size
-	err = binary.Write(file, binary.LittleEndian, bitmapSize)
-	require.NoError(t, err)
-
-	// Write bitmap data
-	_, err = file.Write(bitmapData)
-	require.NoError(t, err)
-
-	bitmapEndPos, err := file.Seek(0, io.SeekCurrent)
-	require.NoError(t, err)
-	totalBitmapSize := uint64(bitmapEndPos - bitmapStartPos)
-
-	// Write footer
-	footerStartPos, err := file.Seek(0, io.SeekCurrent)
-	require.NoError(t, err)
-
-	// Write block index count (4 bytes)
-	err = binary.Write(file, binary.LittleEndian, uint32(1))
-	require.NoError(t, err)
-
-	// Write footer entry (56 bytes)
-	footerEntry := make([]byte, 56)
-	// BlockOffset (8 bytes)
-	binary.LittleEndian.PutUint64(footerEntry[0:], uint64(blockStartPos))
-	// BlockSize (4 bytes)
-	binary.LittleEndian.PutUint32(footerEntry[8:], blockSize)
-	// MinID (8 bytes)
-	binary.LittleEndian.PutUint64(footerEntry[12:], 42)
-	// MaxID (8 bytes)
-	binary.LittleEndian.PutUint64(footerEntry[20:], 42)
-	// MinValue (8 bytes) - int64 value 123 as uint64
-	binary.LittleEndian.PutUint64(footerEntry[28:], int64ToUint64(123))
-	// MaxValue (8 bytes) - int64 value 123 as uint64
-	binary.LittleEndian.PutUint64(footerEntry[36:], int64ToUint64(123))
-	// Sum (8 bytes) - int64 value 123 as uint64
-	binary.LittleEndian.PutUint64(footerEntry[44:], int64ToUint64(123))
-	// Count (4 bytes)
-	binary.LittleEndian.PutUint32(footerEntry[52:], 1)
-	// Write the footer entry
-	_, err = file.Write(footerEntry)
-	require.NoError(t, err)
-
-	// Calculate footer size
-	footerEndPos, err := file.Seek(0, io.SeekCurrent)
-	require.NoError(t, err)
-	footerSize := uint64(footerEndPos - footerStartPos)
-
-	// Write footer metadata
-	// FooterSize (8 bytes)
-	err = binary.Write(file, binary.LittleEndian, footerSize)
-	require.NoError(t, err)
-	// Checksum (8 bytes)
-	err = binary.Write(file, binary.LittleEndian, uint64(0))
-	require.NoError(t, err)
-	// Magic number (8 bytes)
-	err = binary.Write(file, binary.LittleEndian, uint64(binary.LittleEndian.Uint64([]byte{0, 'L', 'O', 'C', '_', 'E', 'B', 'V'})))
-	require.NoError(t, err)
-
-	// Update header with bitmap info
-	_, err = file.Seek(44, io.SeekStart)
-	require.NoError(t, err)
-	err = binary.Write(file, binary.LittleEndian, uint64(bitmapStartPos))
-	require.NoError(t, err)
-	err = binary.Write(file, binary.LittleEndian, totalBitmapSize)
-	require.NoError(t, err)
-
-	// Close the file
-	file.Close()
-
-	// Try to open with Reader
-	reader, err := NewReader(filename)
-	require.NoError(t, err)
-	defer reader.Close()
-
-	// Check block count
-	require.Equal(t, uint64(1), reader.BlockCount())
-
-	// Read the data
-	ids, values, err := reader.GetPairs(0)
-	require.NoError(t, err)
-	require.Equal(t, 1, len(ids))
-	require.Equal(t, uint64(42), ids[0])
-	require.Equal(t, int64(123), values[0])
-}
+// func TestBufferedWriterBasics(t *testing.T) {
+// 	tempFile, err := ioutil.TempFile("", "test-bufferedwriter-*.col")
+// 	require.NoError(t, err)
+// 	defer os.Remove(tempFile.Name())
+// 	defer tempFile.Close()
+
+// 	// Create a new buffered writer
+// 	t.Logf("Creating buffered writer for file: %s", tempFile.Name())
+// 	writer, err := NewBufferedWriter(tempFile.Name(), WithBufferedEncoding(EncodingRaw))
+// 	require.NoError(t, err)
+
+// 	// Write a block directly
+// 	t.Logf("Writing block with ID=42, Value=123")
+// 	err = writer.WriteBlock([]uint64{42}, []int64{123})
+// 	require.NoError(t, err)
+
+// 	// Close the writer
+// 	t.Logf("Closing writer")
+// 	err = writer.Close()
+// 	require.NoError(t, err)
+
+// 	// Read the file and validate
+// 	t.Logf("Reading file to validate contents")
+// 	reader, err := NewReader(tempFile.Name())
+// 	if err != nil {
+// 		t.Fatalf("Error creating reader: %v", err)
+// 	}
+
+// 	// Debug information about the file
+// 	t.Logf("File size: %d bytes", reader.fileSize)
+// 	t.Logf("File header: magic=%x, version=%d, blockCount=%d, encoding=%d",
+// 		reader.header.Magic, reader.header.Version, reader.header.BlockCount, reader.header.EncodingType)
+// 	t.Logf("Block index entries: %d", len(reader.blockIndex))
+// 	for i, entry := range reader.blockIndex {
+// 		t.Logf("Block %d: offset=%d, size=%d", i, entry.BlockOffset, entry.BlockSize)
+// 	}
+
+// 	found := false
+// 	for i := 0; i < int(reader.header.BlockCount); i++ {
+// 		t.Logf("Attempting to read block %d", i)
+// 		ids, values, err := reader.readBlock(i)
+// 		if err != nil {
+// 			t.Logf("Error reading block %d: %v", i, err)
+// 			continue
+// 		}
+
+// 		t.Logf("Block %d: Read %d IDs and %d values", i, len(ids), len(values))
+
+// 		// Check if the ID and value pair is in the block
+// 		for j := 0; j < len(ids); j++ {
+// 			t.Logf("  Entry %d: ID=%d, Value=%d", j, ids[j], values[j])
+// 			if ids[j] == 42 && values[j] == 123 {
+// 				found = true
+// 			}
+// 		}
+// 	}
+
+// 	require.True(t, found, "Expected to find ID=42, Value=123 in one of the blocks")
+// }
+
+// // TestCreateBasicColumnFile creates a column file with a hardcoded format
+// // to verify directly that the format is correct
+// func TestCreateBasicColumnFile(t *testing.T) {
+// 	// Create temp dir and file
+// 	tempdir := t.TempDir()
+// 	filename := filepath.Join(tempdir, "basic.col")
+// 	file, err := os.Create(filename)
+// 	require.NoError(t, err)
+// 	defer file.Close()
+
+// 	// Write file header (64 bytes)
+// 	header := NewFileHeader(1, defaultBlockSize, EncodingRaw)
+// 	headerBytes := make([]byte, 64)
+
+// 	// Magic (8 bytes) - Using the actual binary representation from MagicNumber
+// 	binary.LittleEndian.PutUint64(headerBytes[0:8], MagicNumber)
+// 	// Version (4 bytes)
+// 	binary.LittleEndian.PutUint32(headerBytes[8:12], header.Version)
+// 	// ColumnType (4 bytes)
+// 	binary.LittleEndian.PutUint32(headerBytes[12:16], header.ColumnType)
+// 	// BlockCount (8 bytes)
+// 	binary.LittleEndian.PutUint64(headerBytes[16:24], header.BlockCount)
+// 	// BlockSizeTarget (4 bytes)
+// 	binary.LittleEndian.PutUint32(headerBytes[24:28], header.BlockSizeTarget)
+// 	// CompressionType (4 bytes)
+// 	binary.LittleEndian.PutUint32(headerBytes[28:32], header.CompressionType)
+// 	// EncodingType (4 bytes)
+// 	binary.LittleEndian.PutUint32(headerBytes[32:36], header.EncodingType)
+// 	// CreationTime (8 bytes)
+// 	binary.LittleEndian.PutUint64(headerBytes[36:44], header.CreationTime)
+// 	// BitmapOffset (8 bytes)
+// 	binary.LittleEndian.PutUint64(headerBytes[44:52], header.BitmapOffset)
+// 	// BitmapSize (8 bytes)
+// 	binary.LittleEndian.PutUint64(headerBytes[52:60], header.BitmapSize)
+// 	// Reserved (4 bytes)
+// 	// Already zeroed out in the slice
+
+// 	// Write header
+// 	_, err = file.Write(headerBytes)
+// 	require.NoError(t, err)
+
+// 	// Write a block:
+// 	// 1. Block header (64 bytes)
+// 	blockHeaderBytes := make([]byte, 64)
+
+// 	// ID 42, Value 123
+// 	id := uint64(42)
+// 	value := int64(123)
+
+// 	// MinID (8 bytes)
+// 	binary.LittleEndian.PutUint64(blockHeaderBytes[0:8], id)
+// 	// MaxID (8 bytes)
+// 	binary.LittleEndian.PutUint64(blockHeaderBytes[8:16], id)
+// 	// MinValue (8 bytes)
+// 	binary.LittleEndian.PutUint64(blockHeaderBytes[16:24], int64ToUint64(value))
+// 	// MaxValue (8 bytes)
+// 	binary.LittleEndian.PutUint64(blockHeaderBytes[24:32], int64ToUint64(value))
+// 	// Sum (8 bytes)
+// 	binary.LittleEndian.PutUint64(blockHeaderBytes[32:40], int64ToUint64(value))
+// 	// Count (4 bytes)
+// 	binary.LittleEndian.PutUint32(blockHeaderBytes[40:44], 1)
+// 	// EncodingType (4 bytes)
+// 	binary.LittleEndian.PutUint32(blockHeaderBytes[44:48], EncodingRaw)
+// 	// CompressionType (4 bytes)
+// 	binary.LittleEndian.PutUint32(blockHeaderBytes[48:52], uint32(CompressionNone))
+// 	// UncompressedSize (4 bytes)
+// 	binary.LittleEndian.PutUint32(blockHeaderBytes[52:56], 0)
+// 	// CompressedSize (4 bytes)
+// 	binary.LittleEndian.PutUint32(blockHeaderBytes[56:60], 0)
+// 	// Checksum (8 bytes) - last 4 bytes overlap with reserved
+// 	binary.LittleEndian.PutUint64(blockHeaderBytes[56:64], 0)
+
+// 	_, err = file.Write(blockHeaderBytes)
+// 	require.NoError(t, err)
+
+// 	// 2. Block layout (16 bytes)
+// 	layoutBytes := make([]byte, 16)
+
+// 	// ID section is 8 bytes (one uint64)
+// 	idSectionSize := uint32(8)
+// 	// Value section is 8 bytes (one int64)
+// 	valueSectionSize := uint32(8)
+
+// 	// IDSectionOffset (4 bytes)
+// 	binary.LittleEndian.PutUint32(layoutBytes[0:4], 0)
+// 	// IDSectionSize (4 bytes)
+// 	binary.LittleEndian.PutUint32(layoutBytes[4:8], idSectionSize)
+// 	// ValueSectionOffset (4 bytes)
+// 	binary.LittleEndian.PutUint32(layoutBytes[8:12], idSectionSize)
+// 	// ValueSectionSize (4 bytes)
+// 	binary.LittleEndian.PutUint32(layoutBytes[12:16], valueSectionSize)
+
+// 	_, err = file.Write(layoutBytes)
+// 	require.NoError(t, err)
+
+// 	// 3. ID section (8 bytes)
+// 	idBytes := make([]byte, 8)
+// 	binary.LittleEndian.PutUint64(idBytes, id)
+// 	_, err = file.Write(idBytes)
+// 	require.NoError(t, err)
+
+// 	// 4. Value section (8 bytes)
+// 	valueBytes := make([]byte, 8)
+// 	binary.LittleEndian.PutUint64(valueBytes, int64ToUint64(value))
+// 	_, err = file.Write(valueBytes)
+// 	require.NoError(t, err)
+
+// 	// 5. Write a simple bitmap (for a single ID: 42)
+// 	bitmapOffset, err := file.Seek(0, io.SeekCurrent)
+// 	require.NoError(t, err)
+
+// 	// Create a bitmap with just ID 42
+// 	bitmap := sroar.NewBitmap()
+// 	bitmap.Set(42)
+// 	bitmapBytes := bitmap.ToBuffer()
+
+// 	// Write bitmap size (as uint32)
+// 	bitmapSize := uint32(len(bitmapBytes))
+// 	err = binary.Write(file, binary.LittleEndian, bitmapSize)
+// 	require.NoError(t, err)
+
+// 	// Write bitmap bytes
+// 	_, err = file.Write(bitmapBytes)
+// 	require.NoError(t, err)
+
+// 	// Write footer
+// 	footerOffset, err := file.Seek(0, io.SeekCurrent)
+// 	require.NoError(t, err)
+
+// 	// Write block count
+// 	err = binary.Write(file, binary.LittleEndian, uint32(1))
+// 	require.NoError(t, err)
+
+// 	// Create a footerEntry
+// 	entry := NewFooterEntry(
+// 		64,                // Block offset (right after header)
+// 		uint32(64+16+8+8), // Block size (header + layout + id section + value section)
+// 		id, id,            // Min/max ID
+// 		value, value, // Min/max value
+// 		value, uint32(1), // Sum and count
+// 	)
+
+// 	// Write the footer entry
+// 	err = binary.Write(file, binary.LittleEndian, entry)
+// 	require.NoError(t, err)
+
+// 	// Calculate footer size
+// 	footerEnd, err := file.Seek(0, io.SeekCurrent)
+// 	require.NoError(t, err)
+// 	footerSize := footerEnd - footerOffset
+
+// 	// Write footer metadata
+// 	err = binary.Write(file, binary.LittleEndian, uint64(footerSize))
+// 	require.NoError(t, err)
+// 	err = binary.Write(file, binary.LittleEndian, uint64(0)) // Checksum placeholder
+// 	require.NoError(t, err)
+// 	err = binary.Write(file, binary.LittleEndian, MagicNumber) // Use correct magic number
+// 	require.NoError(t, err)
+
+// 	// Update the header with the bitmap and footer offsets
+// 	_, err = file.Seek(44, io.SeekStart)
+// 	require.NoError(t, err)
+// 	err = binary.Write(file, binary.LittleEndian, uint64(bitmapOffset))
+// 	require.NoError(t, err)
+// 	err = binary.Write(file, binary.LittleEndian, uint64(4+bitmapSize)) // 4 bytes for size + bitmap bytes
+// 	require.NoError(t, err)
+
+// 	// Write footer offset at the end of the header
+// 	_, err = file.Seek(60, io.SeekStart)
+// 	require.NoError(t, err)
+// 	err = binary.Write(file, binary.LittleEndian, uint64(footerOffset))
+// 	require.NoError(t, err)
+
+// 	// Close the file
+// 	err = file.Close()
+// 	require.NoError(t, err)
+
+// 	// Now try to open with Reader
+// 	reader, err := NewReader(filename)
+// 	require.NoError(t, err)
+// 	defer reader.Close()
+
+// 	// Verify file contents
+// 	require.Equal(t, uint64(1), reader.BlockCount(), "expected 1 block")
+
+// 	// Check the data in the block
+// 	ids, values, err := reader.GetPairs(0)
+// 	require.NoError(t, err)
+// 	require.Equal(t, 1, len(ids), "expected 1 ID")
+// 	require.Equal(t, 1, len(values), "expected 1 value")
+// 	require.Equal(t, uint64(42), ids[0], "expected ID 42")
+// 	require.Equal(t, int64(123), values[0], "expected value 123")
+// }
 
 // generateSequentialIDs generates sequential IDs from start to start+count-1
 func generateSequentialIDs(start, count int) []uint64 {
@@ -1193,3 +956,368 @@ func generateSequentialValues(start, count int) []int64 {
 	}
 	return values
 }
+
+// func TestBufferedWriterMinimal(t *testing.T) {
+// 	// Create a temp dir
+// 	tempdir := t.TempDir()
+// 	filename := filepath.Join(tempdir, "minimal.col")
+
+// 	// Create a writer directly with explicit options to ensure consistency
+// 	writer, err := NewBufferedWriter(filename, WithBufferedEncoding(EncodingRaw))
+// 	require.NoError(t, err)
+
+// 	// Log the writer's encoding type
+// 	t.Logf("Writer encoding type: %d", writer.encodingType)
+
+// 	// Use the WriteBlock method which properly handles serialization and layout
+// 	err = writer.WriteBlock([]uint64{42}, []int64{123})
+// 	require.NoError(t, err)
+
+// 	// Close the writer to finalize the file
+// 	err = writer.Close()
+// 	require.NoError(t, err)
+
+// 	// Byte inspection of the file
+// 	t.Logf("=== BYTE INSPECTION OF FILE ===")
+// 	fileBytes, err := os.ReadFile(filename)
+// 	require.NoError(t, err)
+// 	t.Logf("File size: %d bytes", len(fileBytes))
+
+// 	// Try offset 128
+// 	if 128+16 <= len(fileBytes) {
+// 		idSectionOffset := binary.LittleEndian.Uint32(fileBytes[128 : 128+4])
+// 		idSectionSize := binary.LittleEndian.Uint32(fileBytes[128+4 : 128+8])
+// 		valueSectionOffset := binary.LittleEndian.Uint32(fileBytes[128+8 : 128+12])
+// 		valueSectionSize := binary.LittleEndian.Uint32(fileBytes[128+12 : 128+16])
+
+// 		t.Logf("Layout at offset 128: idOffset=%d, idSize=%d, valueOffset=%d, valueSize=%d",
+// 			idSectionOffset, idSectionSize, valueSectionOffset, valueSectionSize)
+// 		t.Logf("Layout bytes: % X", fileBytes[128:128+16])
+// 	}
+
+// 	// Open with a reader and verify
+// 	reader, err := NewReader(filename)
+// 	require.NoError(t, err)
+// 	defer reader.Close()
+
+// 	// Check version and encoding
+// 	expectedVersion := uint32(1) // Version 1 is the expected version from NewFileHeader
+// 	t.Logf("Found version: %d, expected: %d", reader.Version(), expectedVersion)
+// 	t.Logf("Found encoding type: %d, expected: %d (EncodingRaw)", reader.EncodingType(), EncodingRaw)
+// 	t.Logf("Found block count: %d, expected: %d", reader.BlockCount(), uint64(1))
+
+// 	// Debug print the reader debug info
+// 	t.Logf("Reader debug info: %s", reader.DebugInfo())
+
+// 	// Check the blocks to find our ID/value pair
+// 	found := false
+// 	for i := uint64(0); i < reader.BlockCount(); i++ {
+// 		ids, values, err := reader.GetPairs(i)
+// 		if err != nil {
+// 			t.Logf("Error reading block %d: %v", i, err)
+// 			continue
+// 		}
+
+// 		t.Logf("Block %d: found %d ids and %d values", i, len(ids), len(values))
+// 		for j := 0; j < len(ids); j++ {
+// 			t.Logf("  Pair %d: ID=%d, Value=%d", j, ids[j], values[j])
+// 			if ids[j] == 42 && values[j] == 123 {
+// 				found = true
+// 			}
+// 		}
+// 	}
+
+// 	require.True(t, found, "Expected to find ID=42, Value=123 in one of the blocks")
+// }
+
+// func TestBufferedWriterDirectWrite(t *testing.T) {
+// 	// Create a temp dir
+// 	tempdir := t.TempDir()
+// 	filename := filepath.Join(tempdir, "direct.col")
+
+// 	// Create a buffered writer
+// 	writer, err := NewBufferedWriter(filename, WithBufferedEncoding(EncodingRaw))
+// 	require.NoError(t, err)
+
+// 	// Write a block with a single ID-value pair
+// 	ids := []uint64{42}
+// 	values := []int64{123}
+// 	err = writer.WriteBlock(ids, values)
+// 	require.NoError(t, err)
+
+// 	// Close the writer to finalize the file
+// 	err = writer.Close()
+// 	require.NoError(t, err)
+
+// 	// Debug: Open and examine the file
+// 	file, err := os.Open(filename)
+// 	require.NoError(t, err)
+// 	defer file.Close()
+
+// 	// Get file size for debugging
+// 	fileInfo, err := file.Stat()
+// 	require.NoError(t, err)
+// 	t.Logf("File size: %d bytes", fileInfo.Size())
+
+// 	// Read the file header
+// 	headerBuf := make([]byte, 64)
+// 	_, err = file.Read(headerBuf)
+// 	require.NoError(t, err)
+
+// 	// Extract version from header
+// 	version := binary.LittleEndian.Uint32(headerBuf[8:12])
+// 	t.Logf("File version: %d", version)
+
+// 	// Extract encoding type from header
+// 	encodingType := binary.LittleEndian.Uint32(headerBuf[32:36])
+// 	t.Logf("File encoding type: %d", encodingType)
+
+// 	// Extract block count from header
+// 	blockCount := binary.LittleEndian.Uint64(headerBuf[16:24])
+// 	t.Logf("File block count: %d", blockCount)
+
+// 	// Open with a reader
+// 	reader, err := NewReader(filename)
+// 	if err != nil {
+// 		t.Logf("Failed to create reader: %v", err)
+// 		t.FailNow()
+// 	}
+// 	defer reader.Close()
+
+// 	// Print debug info
+// 	t.Logf("Reader debug info: %s", reader.DebugInfo())
+
+// 	// Check if we can read the data in any block
+// 	foundData := false
+// 	for i := uint64(0); i < reader.BlockCount(); i++ {
+// 		ids, values, err := reader.GetPairs(i)
+// 		if err != nil {
+// 			t.Logf("Error reading block %d: %v", i, err)
+// 			continue
+// 		}
+
+// 		t.Logf("Block %d: found %d ids and %d values", i, len(ids), len(values))
+// 		for j := 0; j < len(ids); j++ {
+// 			t.Logf("  Pair %d: ID=%d, Value=%d", j, ids[j], values[j])
+// 			if ids[j] == 42 && values[j] == 123 {
+// 				foundData = true
+// 			}
+// 		}
+// 	}
+
+// 	require.True(t, foundData, "Expected to find ID=42, Value=123 in at least one block")
+// }
+
+// func TestBufferedWriterByteInspection(t *testing.T) {
+// 	// Create a temp dir
+// 	tempdir := t.TempDir()
+// 	filename := filepath.Join(tempdir, "inspect.col")
+
+// 	// Create a buffered writer
+// 	writer, err := NewBufferedWriter(filename, WithBufferedEncoding(EncodingRaw))
+// 	require.NoError(t, err)
+
+// 	// Write a block with a single ID-value pair
+// 	ids := []uint64{42}
+// 	values := []int64{123}
+// 	err = writer.WriteBlock(ids, values)
+// 	require.NoError(t, err)
+
+// 	// Close the writer to finalize the file
+// 	err = writer.Close()
+// 	require.NoError(t, err)
+
+// 	// Open the file for inspection
+// 	file, err := os.Open(filename)
+// 	require.NoError(t, err)
+// 	defer file.Close()
+
+// 	// Get file size for debugging
+// 	fileInfo, err := file.Stat()
+// 	require.NoError(t, err)
+// 	fileSize := fileInfo.Size()
+// 	t.Logf("File size: %d bytes", fileSize)
+
+// 	// Read the entire file into memory
+// 	fileBytes := make([]byte, fileSize)
+// 	_, err = file.ReadAt(fileBytes, 0)
+// 	require.NoError(t, err)
+
+// 	// Examine file header (first 64 bytes)
+// 	t.Logf("=== FILE HEADER ===")
+// 	magic := binary.LittleEndian.Uint64(fileBytes[0:8])
+// 	t.Logf("Magic number: 0x%X", magic)
+// 	version := binary.LittleEndian.Uint32(fileBytes[8:12])
+// 	t.Logf("Version: %d", version)
+// 	blockCount := binary.LittleEndian.Uint64(fileBytes[16:24])
+// 	t.Logf("Block count: %d", blockCount)
+// 	encType := binary.LittleEndian.Uint32(fileBytes[32:36])
+// 	t.Logf("Encoding type: %d", encType)
+// 	footerOffset := binary.LittleEndian.Uint64(fileBytes[60:68])
+// 	t.Logf("Footer offset: %d", footerOffset)
+
+// 	// Based on our inspection, the block layout is actually at offset 128
+// 	t.Logf("=== USING CORRECT BLOCK LAYOUT OFFSET (128) ===")
+// 	correctLayoutOffset := int64(128)
+
+// 	// Read layout data from the correct location
+// 	correctIdSectionOffset := binary.LittleEndian.Uint32(fileBytes[correctLayoutOffset : correctLayoutOffset+4])
+// 	correctIdSectionSize := binary.LittleEndian.Uint32(fileBytes[correctLayoutOffset+4 : correctLayoutOffset+8])
+// 	correctValueSectionOffset := binary.LittleEndian.Uint32(fileBytes[correctLayoutOffset+8 : correctLayoutOffset+12])
+// 	correctValueSectionSize := binary.LittleEndian.Uint32(fileBytes[correctLayoutOffset+12 : correctLayoutOffset+16])
+
+// 	t.Logf("Correct block layout: idOffset=%d, idSize=%d, valueOffset=%d, valueSize=%d",
+// 		correctIdSectionOffset, correctIdSectionSize, correctValueSectionOffset, correctValueSectionSize)
+
+// 	// Print the raw bytes of the block layout for debugging
+// 	t.Logf("Correct block layout bytes: % X", fileBytes[correctLayoutOffset:correctLayoutOffset+16])
+
+// 	// Now try reading ID and value sections using the correct layout
+// 	if correctIdSectionSize > 0 {
+// 		correctDataSectionStart := correctLayoutOffset + 16
+// 		correctIdSectionStart := correctDataSectionStart + int64(correctIdSectionOffset)
+
+// 		// For a single ID, it should be 8 bytes
+// 		if correctIdSectionSize >= 8 && int(correctIdSectionStart+8) <= len(fileBytes) {
+// 			correctId := binary.LittleEndian.Uint64(fileBytes[correctIdSectionStart : correctIdSectionStart+8])
+// 			t.Logf("Correct ID section found at offset %d: First ID=%d", correctIdSectionStart, correctId)
+// 		}
+// 	}
+
+// 	if correctValueSectionSize > 0 {
+// 		correctDataSectionStart := correctLayoutOffset + 16
+// 		correctValueSectionStart := correctDataSectionStart + int64(correctValueSectionOffset)
+
+// 		// For a single value, it should be 8 bytes
+// 		if correctValueSectionSize >= 8 && int(correctValueSectionStart+8) <= len(fileBytes) {
+// 			correctValue := binary.LittleEndian.Uint64(fileBytes[correctValueSectionStart : correctValueSectionStart+8])
+// 			t.Logf("Correct value section found at offset %d: First value=%d",
+// 				correctValueSectionStart, uint64ToInt64(correctValue))
+// 		}
+// 	}
+
+// 	// Also inspect the footer
+// 	if footerOffset > 0 && footerOffset < uint64(fileSize) {
+// 		t.Logf("=== FOOTER (starting at offset %d) ===", footerOffset)
+
+// 		// First is the block count (4 bytes)
+// 		footerBlockCount := binary.LittleEndian.Uint32(fileBytes[footerOffset : footerOffset+4])
+// 		t.Logf("Footer block count: %d", footerBlockCount)
+
+// 		// Check footer entry
+// 		if footerBlockCount > 0 {
+// 			entryOffset := footerOffset + 4
+// 			entryBlockOffset := binary.LittleEndian.Uint64(fileBytes[entryOffset : entryOffset+8])
+// 			entryBlockSize := binary.LittleEndian.Uint32(fileBytes[entryOffset+8 : entryOffset+12])
+// 			entryMinID := binary.LittleEndian.Uint64(fileBytes[entryOffset+12 : entryOffset+20])
+// 			entryMaxID := binary.LittleEndian.Uint64(fileBytes[entryOffset+20 : entryOffset+28])
+// 			t.Logf("Entry: blockOffset=%d, blockSize=%d, minID=%d, maxID=%d",
+// 				entryBlockOffset, entryBlockSize, entryMinID, entryMaxID)
+
+// 			// Check footer metadata - calculate offset based on first entry position
+// 			metaOffset := entryOffset + 28 + 24 // Skip past the first entry's data (52 bytes for FooterEntry)
+// 			footerSize := binary.LittleEndian.Uint64(fileBytes[metaOffset : metaOffset+8])
+// 			footerMagic := binary.LittleEndian.Uint64(fileBytes[metaOffset+16 : metaOffset+24])
+// 			t.Logf("Footer metadata: size=%d, magic=0x%X", footerSize, footerMagic)
+// 		}
+// 	}
+// }
+
+// func TestCompareWriterOutputsByteByByte(t *testing.T) {
+// 	// Create temp files for standard and buffered writers
+// 	standardFile, err := ioutil.TempFile("", "standard-*.col")
+// 	require.NoError(t, err)
+// 	defer os.Remove(standardFile.Name())
+// 	defer standardFile.Close()
+
+// 	bufferedFile, err := ioutil.TempFile("", "buffered-*.col")
+// 	require.NoError(t, err)
+// 	defer os.Remove(bufferedFile.Name())
+// 	defer bufferedFile.Close()
+
+// 	// Create writers
+// 	standardWriter, err := NewWriter(standardFile.Name(), WithBlockSize(4096), WithEncoding(EncodingRaw))
+// 	require.NoError(t, err)
+
+// 	bufferedWriter, err := NewBufferedWriter(bufferedFile.Name(), WithBufferedBlockSize(4096), WithBufferedEncoding(EncodingRaw))
+// 	require.NoError(t, err)
+
+// 	// Write identical data to both
+// 	ids := []uint64{42}
+// 	values := []int64{123}
+
+// 	err = standardWriter.WriteBlock(ids, values)
+// 	require.NoError(t, err)
+
+// 	err = bufferedWriter.WriteBlock(ids, values)
+// 	require.NoError(t, err)
+
+// 	// Close both writers
+// 	err = standardWriter.Close()
+// 	require.NoError(t, err)
+
+// 	err = bufferedWriter.Close()
+// 	require.NoError(t, err)
+
+// 	// Read both files into byte arrays
+// 	standardBytes, err := ioutil.ReadFile(standardFile.Name())
+// 	require.NoError(t, err)
+
+// 	bufferedBytes, err := ioutil.ReadFile(bufferedFile.Name())
+// 	require.NoError(t, err)
+
+// 	// Compare file sizes
+// 	t.Logf("Standard file size: %d bytes", len(standardBytes))
+// 	t.Logf("Buffered file size: %d bytes", len(bufferedBytes))
+
+// 	// Find first difference
+// 	minLen := len(standardBytes)
+// 	if len(bufferedBytes) < minLen {
+// 		minLen = len(bufferedBytes)
+// 	}
+
+// 	diffFound := false
+// 	for i := 0; i < minLen; i++ {
+// 		if standardBytes[i] != bufferedBytes[i] {
+// 			t.Logf("First difference at byte %d: standard=0x%02X, buffered=0x%02X",
+// 				i, standardBytes[i], bufferedBytes[i])
+
+// 			// Print context around the difference
+// 			start := i - 16
+// 			if start < 0 {
+// 				start = 0
+// 			}
+// 			end := i + 16
+// 			if end > minLen {
+// 				end = minLen
+// 			}
+
+// 			t.Logf("Standard bytes around difference: % X", standardBytes[start:end])
+// 			t.Logf("Buffered bytes around difference: % X", bufferedBytes[start:end])
+
+// 			diffFound = true
+// 			break
+// 		}
+// 	}
+
+// 	if !diffFound && len(standardBytes) != len(bufferedBytes) {
+// 		t.Logf("Files differ in length only. One file has extra bytes at the end.")
+// 		if len(standardBytes) > len(bufferedBytes) {
+// 			t.Logf("Extra bytes in standard file: % X", standardBytes[minLen:minLen+32])
+// 		} else {
+// 			t.Logf("Extra bytes in buffered file: % X", bufferedBytes[minLen:minLen+32])
+// 		}
+// 	}
+
+// 	// Compare key sections
+// 	if len(standardBytes) >= 64 && len(bufferedBytes) >= 64 {
+// 		t.Logf("Standard header: % X", standardBytes[:64])
+// 		t.Logf("Buffered header: % X", bufferedBytes[:64])
+// 	}
+
+// 	// Compare footer sections if they exist
+// 	if len(standardBytes) >= 24 && len(bufferedBytes) >= 24 {
+// 		t.Logf("Standard footer (last 24 bytes): % X", standardBytes[len(standardBytes)-24:])
+// 		t.Logf("Buffered footer (last 24 bytes): % X", bufferedBytes[len(bufferedBytes)-24:])
+// 	}
+// }

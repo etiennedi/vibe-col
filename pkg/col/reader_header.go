@@ -54,6 +54,13 @@ func (r *Reader) readHeader() error {
 
 	// Read bitmap size
 	r.header.BitmapSize = readBufferedUint64(headerBuf, offset)
+	offset += 8
+
+	// Only try to read footer offset if there's enough bytes in the header buffer
+	if offset+8 <= len(headerBuf) {
+		// Read footer offset
+		r.header.FooterOffset = readBufferedUint64(headerBuf, offset)
+	}
 
 	// Validate header
 	if r.header.Magic != MagicNumber {
@@ -68,32 +75,67 @@ func (r *Reader) readHeader() error {
 
 // readFooter reads the footer from the file
 func (r *Reader) readFooter() error {
-	// The last 24 bytes of the file are the footer metadata
-	if r.fileSize < 24 {
-		return fmt.Errorf("file too small for footer: %d bytes", r.fileSize)
+	// Use footer offset from header if available, otherwise calculate from file size
+	var footerStart int64
+	if r.header.FooterOffset > 0 {
+		footerStart = int64(r.header.FooterOffset)
+	} else {
+		// The last 24 bytes of the file are the footer metadata
+		if r.fileSize < 24 {
+			return fmt.Errorf("file too small for footer: %d bytes", r.fileSize)
+		}
+
+		// Read footer metadata from the end of the file in one call
+		footerMetaOffset := r.fileSize - 24
+		footerMetaBuf, err := r.readBytesAt(footerMetaOffset, 24)
+		if err != nil {
+			return fmt.Errorf("failed to read footer metadata: %w", err)
+		}
+
+		// Extract fields from the buffer
+		r.footerMeta.FooterSize = readBufferedUint64(footerMetaBuf, 0)
+		r.footerMeta.Checksum = readBufferedUint64(footerMetaBuf, 8)
+		r.footerMeta.Magic = readBufferedUint64(footerMetaBuf, 16)
+
+		// Validate footer metadata
+		if r.footerMeta.Magic != MagicNumber {
+			return fmt.Errorf("invalid footer magic number: 0x%X", r.footerMeta.Magic)
+		}
+
+		// Calculate the footer start position
+		footerStart = footerMetaOffset - int64(r.footerMeta.FooterSize)
+		if footerStart < 64 { // Footer cannot start before the header
+			return fmt.Errorf("invalid footer size: %d", r.footerMeta.FooterSize)
+		}
 	}
 
-	// Read footer metadata from the end of the file in one call
-	footerMetaOffset := r.fileSize - 24
-	footerMetaBuf, err := r.readBytesAt(footerMetaOffset, 24)
-	if err != nil {
-		return fmt.Errorf("failed to read footer metadata: %w", err)
-	}
+	// Read footer metadata from the end of the file if not already read
+	if r.header.FooterOffset > 0 {
+		// We need to calculate where the footer metadata starts
+		// Get file size if not already done
+		if r.fileSize == 0 {
+			fileInfo, err := r.file.Stat()
+			if err != nil {
+				return fmt.Errorf("failed to get file info: %w", err)
+			}
+			r.fileSize = fileInfo.Size()
+		}
 
-	// Extract fields from the buffer
-	r.footerMeta.FooterSize = readBufferedUint64(footerMetaBuf, 0)
-	r.footerMeta.Checksum = readBufferedUint64(footerMetaBuf, 8)
-	r.footerMeta.Magic = readBufferedUint64(footerMetaBuf, 16)
+		footerMetaOffset := r.fileSize - 24
+		footerMetaBuf, err := r.readBytesAt(footerMetaOffset, 24)
+		if err != nil {
+			return fmt.Errorf("failed to read footer metadata: %w", err)
+		}
 
-	// Validate footer metadata
-	if r.footerMeta.Magic != MagicNumber {
-		return fmt.Errorf("invalid footer magic number: 0x%X", r.footerMeta.Magic)
-	}
+		// Extract fields from the buffer
+		r.footerMeta.FooterSize = readBufferedUint64(footerMetaBuf, 0)
+		r.footerMeta.Checksum = readBufferedUint64(footerMetaBuf, 8)
+		r.footerMeta.Magic = readBufferedUint64(footerMetaBuf, 16)
 
-	// Read the rest of the footer
-	footerStart := footerMetaOffset - int64(r.footerMeta.FooterSize)
-	if footerStart < 64 { // Footer cannot start before the header
-		return fmt.Errorf("invalid footer size: %d", r.footerMeta.FooterSize)
+		// Validate footer metadata
+		if r.footerMeta.Magic != MagicNumber {
+			return fmt.Errorf("invalid footer magic number: 0x%X", r.footerMeta.Magic)
+		}
 	}
 
 	// Read block index count (first 4 bytes of footer)

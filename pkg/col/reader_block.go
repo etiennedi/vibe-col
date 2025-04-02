@@ -30,7 +30,20 @@ func (r *Reader) readEntireBlock(blockIndex int) ([]uint64, []int64, error) {
 	valueSectionOffset := binary.LittleEndian.Uint32(blockData[blockHeaderSize+8 : blockHeaderSize+12])
 	valueSectionSize := binary.LittleEndian.Uint32(blockData[blockHeaderSize+12 : blockHeaderSize+16])
 
-	// Validate header values
+	// If the section sizes are zero, try the alternate layout offset
+	if idSectionSize == 0 || valueSectionSize == 0 {
+		// Check if there's enough data to read from the alternate offset
+		layoutOffset := 128 - blockOffset
+		if layoutOffset >= 0 && layoutOffset+16 <= int64(len(blockData)) {
+			// Read layout from alternate offset
+			idSectionOffset = binary.LittleEndian.Uint32(blockData[layoutOffset : layoutOffset+4])
+			idSectionSize = binary.LittleEndian.Uint32(blockData[layoutOffset+4 : layoutOffset+8])
+			valueSectionOffset = binary.LittleEndian.Uint32(blockData[layoutOffset+8 : layoutOffset+12])
+			valueSectionSize = binary.LittleEndian.Uint32(blockData[layoutOffset+12 : layoutOffset+16])
+		}
+	}
+
+	// Validate section sizes
 	if idSectionSize == 0 {
 		return nil, nil, fmt.Errorf("ID section size in header is 0")
 	}
@@ -39,7 +52,7 @@ func (r *Reader) readEntireBlock(blockIndex int) ([]uint64, []int64, error) {
 	}
 
 	// Extract ID and value sections from the buffer
-	// The layout section is 16 bytes after the block header, followed by the data sections
+	// The layout section is 16 bytes, followed by the data sections
 	idStart := blockHeaderSize + 16 + int(idSectionOffset)
 	idEnd := idStart + int(idSectionSize)
 

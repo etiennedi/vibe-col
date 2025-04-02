@@ -7,7 +7,7 @@ const (
 
 	// Size constants
 	headerSize      = 64
-	blockHeaderSize = 64
+	blockHeaderSize = 96
 	blockLayoutSize = 16
 
 	// Default block size (target)
