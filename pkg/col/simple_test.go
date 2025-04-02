@@ -101,7 +101,7 @@ func TestSimpleColumnFile(t *testing.T) {
 
 	// Read the ID section
 	idSection := make([]byte, idSectionSize)
-	file.Seek(160, os.SEEK_SET)
+	file.Seek(160, io.SeekStart)
 	if _, err := io.ReadFull(file, idSection); err != nil {
 		t.Fatalf("Failed to read ID section: %v", err)
 	}

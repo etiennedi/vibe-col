@@ -366,7 +366,7 @@ func (w *Writer) writeBlockInternal(blockData *BlockData) error {
 	}
 
 	if blockData.ValueSectionSize == 0 {
-		return fmt.Errorf("Value section size is 0, which is invalid. count=%d",
+		return fmt.Errorf("value section size is 0, which is invalid. count=%d",
 			blockData.Count)
 	}
 

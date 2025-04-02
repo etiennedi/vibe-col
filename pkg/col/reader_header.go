@@ -17,49 +17,49 @@ func (r *Reader) readHeader() error {
 	offset := 0
 
 	// Read magic number
-	r.header.Magic = readBufferedUint64(headerBuf, offset)
+	r.header.Magic = readBufferedUint64(&headerBuf, offset)
 	offset += 8
 
 	// Read version
-	r.header.Version = readBufferedUint32(headerBuf, offset)
+	r.header.Version = readBufferedUint32(&headerBuf, offset)
 	offset += 4
 
 	// Read column type
-	r.header.ColumnType = readBufferedUint32(headerBuf, offset)
+	r.header.ColumnType = readBufferedUint32(&headerBuf, offset)
 	offset += 4
 
 	// Read block count
-	r.header.BlockCount = readBufferedUint64(headerBuf, offset)
+	r.header.BlockCount = readBufferedUint64(&headerBuf, offset)
 	offset += 8
 
 	// Read block size target
-	r.header.BlockSizeTarget = readBufferedUint32(headerBuf, offset)
+	r.header.BlockSizeTarget = readBufferedUint32(&headerBuf, offset)
 	offset += 4
 
 	// Read compression type
-	r.header.CompressionType = readBufferedUint32(headerBuf, offset)
+	r.header.CompressionType = readBufferedUint32(&headerBuf, offset)
 	offset += 4
 
 	// Read encoding type
-	r.header.EncodingType = readBufferedUint32(headerBuf, offset)
+	r.header.EncodingType = readBufferedUint32(&headerBuf, offset)
 	offset += 4
 
 	// Read creation time
-	r.header.CreationTime = readBufferedUint64(headerBuf, offset)
+	r.header.CreationTime = readBufferedUint64(&headerBuf, offset)
 	offset += 8
 
 	// Read bitmap offset
-	r.header.BitmapOffset = readBufferedUint64(headerBuf, offset)
+	r.header.BitmapOffset = readBufferedUint64(&headerBuf, offset)
 	offset += 8
 
 	// Read bitmap size
-	r.header.BitmapSize = readBufferedUint64(headerBuf, offset)
+	r.header.BitmapSize = readBufferedUint64(&headerBuf, offset)
 	offset += 8
 
 	// Only try to read footer offset if there's enough bytes in the header buffer
 	if offset+8 <= len(headerBuf) {
 		// Read footer offset
-		r.header.FooterOffset = readBufferedUint64(headerBuf, offset)
+		r.header.FooterOffset = readBufferedUint64(&headerBuf, offset)
 	}
 
 	// Validate header
@@ -93,9 +93,9 @@ func (r *Reader) readFooter() error {
 		}
 
 		// Extract fields from the buffer
-		r.footerMeta.FooterSize = readBufferedUint64(footerMetaBuf, 0)
-		r.footerMeta.Checksum = readBufferedUint64(footerMetaBuf, 8)
-		r.footerMeta.Magic = readBufferedUint64(footerMetaBuf, 16)
+		r.footerMeta.FooterSize = readBufferedUint64(&footerMetaBuf, 0)
+		r.footerMeta.Checksum = readBufferedUint64(&footerMetaBuf, 8)
+		r.footerMeta.Magic = readBufferedUint64(&footerMetaBuf, 16)
 
 		// Validate footer metadata
 		if r.footerMeta.Magic != MagicNumber {
@@ -128,9 +128,9 @@ func (r *Reader) readFooter() error {
 		}
 
 		// Extract fields from the buffer
-		r.footerMeta.FooterSize = readBufferedUint64(footerMetaBuf, 0)
-		r.footerMeta.Checksum = readBufferedUint64(footerMetaBuf, 8)
-		r.footerMeta.Magic = readBufferedUint64(footerMetaBuf, 16)
+		r.footerMeta.FooterSize = readBufferedUint64(&footerMetaBuf, 0)
+		r.footerMeta.Checksum = readBufferedUint64(&footerMetaBuf, 8)
+		r.footerMeta.Magic = readBufferedUint64(&footerMetaBuf, 16)
 
 		// Validate footer metadata
 		if r.footerMeta.Magic != MagicNumber {
@@ -169,14 +169,14 @@ func (r *Reader) readFooter() error {
 		entryOffset := i * 56
 
 		r.blockIndex[i] = FooterEntry{
-			BlockOffset: readBufferedUint64(blockIndexBuf, int(entryOffset)),
-			BlockSize:   readBufferedUint32(blockIndexBuf, int(entryOffset+8)),
-			MinID:       readBufferedUint64(blockIndexBuf, int(entryOffset+12)),
-			MaxID:       readBufferedUint64(blockIndexBuf, int(entryOffset+20)),
-			MinValue:    readBufferedUint64(blockIndexBuf, int(entryOffset+28)),
-			MaxValue:    readBufferedUint64(blockIndexBuf, int(entryOffset+36)),
-			Sum:         readBufferedUint64(blockIndexBuf, int(entryOffset+44)),
-			Count:       readBufferedUint32(blockIndexBuf, int(entryOffset+52)),
+			BlockOffset: readBufferedUint64(&blockIndexBuf, int(entryOffset)),
+			BlockSize:   readBufferedUint32(&blockIndexBuf, int(entryOffset+8)),
+			MinID:       readBufferedUint64(&blockIndexBuf, int(entryOffset+12)),
+			MaxID:       readBufferedUint64(&blockIndexBuf, int(entryOffset+20)),
+			MinValue:    readBufferedUint64(&blockIndexBuf, int(entryOffset+28)),
+			MaxValue:    readBufferedUint64(&blockIndexBuf, int(entryOffset+36)),
+			Sum:         readBufferedUint64(&blockIndexBuf, int(entryOffset+44)),
+			Count:       readBufferedUint32(&blockIndexBuf, int(entryOffset+52)),
 		}
 	}
 

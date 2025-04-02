@@ -45,10 +45,10 @@ func (r *Reader) readEntireBlock(blockIndex int) ([]uint64, []int64, error) {
 
 	// Validate section sizes
 	if idSectionSize == 0 {
-		return nil, nil, fmt.Errorf("ID section size in header is 0")
+		return nil, nil, fmt.Errorf("id section size in header is 0")
 	}
 	if valueSectionSize == 0 {
-		return nil, nil, fmt.Errorf("Value section size in header is 0")
+		return nil, nil, fmt.Errorf("value section size in header is 0")
 	}
 
 	// Extract ID and value sections from the buffer

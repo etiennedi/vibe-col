@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -605,7 +604,7 @@ func readAndDecodeHeader(file *os.File) (FileHeader, FooterMetadata, error) {
 }
 
 func TestBufferedWriterBasics(t *testing.T) {
-	tempFile, err := ioutil.TempFile("", "test-bufferedwriter-*.col")
+	tempFile, err := os.CreateTemp("", "test-bufferedwriter-*.col")
 	require.NoError(t, err)
 	defer os.Remove(tempFile.Name())
 	defer tempFile.Close()

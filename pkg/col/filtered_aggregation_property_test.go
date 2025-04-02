@@ -29,7 +29,7 @@ func TestFilteredAggregationProperties(t *testing.T) {
 	// Generate test data with a mix of positive and negative values
 	var allIDs []uint64
 	var allValues []int64
-	rand.Seed(seed)
+	r := rand.New(rand.NewSource(seed))
 
 	// Create a smaller test dataset for faster testing
 	totalEntries := numEntries
@@ -40,7 +40,7 @@ func TestFilteredAggregationProperties(t *testing.T) {
 	for i := 0; i < totalEntries; i++ {
 		allIDs[i] = uint64(i*3) + 1 // Ensure IDs are unique
 		// Use values between -1000 and 1000 for more predictable test results
-		allValues[i] = int64(rand.Intn(2000) - 1000)
+		allValues[i] = int64(r.Intn(2000) - 1000)
 	}
 
 	// Write data in batches for efficiency

@@ -6,6 +6,7 @@ import (
 )
 
 // decodeBlockData decodes the ID and value byte arrays into usable slices
+// This function creates new slices for IDs and values to ensure thread safety
 func decodeBlockData(idBytes, valueBytes []byte, count int, encodingType uint32) ([]uint64, []int64, error) {
 	// Decode IDs
 	var ids []uint64
@@ -109,7 +110,14 @@ func decodeBlockData(idBytes, valueBytes []byte, count int, encodingType uint32)
 		}
 	}
 
-	return ids, values, nil
+	// Create deep copies of the slices to ensure thread safety for concurrent callers
+	idsCopy := make([]uint64, len(ids))
+	copy(idsCopy, ids)
+
+	valuesCopy := make([]int64, len(values))
+	copy(valuesCopy, values)
+
+	return idsCopy, valuesCopy, nil
 }
 
 // Helper function to decode exactly 'count' UVarInts from buf

@@ -51,14 +51,44 @@ func TestConcurrentReads(t *testing.T) {
 	// Verify the block count
 	assert.Equal(t, uint64(numBlocks), reader.BlockCount())
 
-	// Create a wait group to synchronize goroutines
+	// FIRST: Test sequential reading of each block
+	// This validates the basic functionality before attempting concurrent access
+	sequentialResults := make(map[int][]int64)
+	for blockIdx := 0; blockIdx < numBlocks; blockIdx++ {
+		// Read the block
+		ids, values, err := reader.GetPairs(uint64(blockIdx))
+		assert.NoError(t, err)
+
+		// Verify the number of entries
+		assert.Equal(t, entriesPerBlock, len(ids))
+		assert.Equal(t, entriesPerBlock, len(values))
+
+		// Store first 5 values for comparison
+		valuesCopy := make([]int64, 5)
+		copy(valuesCopy, values[:5])
+		sequentialResults[blockIdx] = valuesCopy
+
+		// Verify the actual data for the first few entries
+		baseValue := int64(blockIdx * entriesPerBlock * 10)
+		expected := []int64{
+			baseValue,
+			baseValue + 10,
+			baseValue + 20,
+			baseValue + 30,
+			baseValue + 40,
+		}
+		actual := values[:5]
+		assert.Equal(t, expected, actual, "Sequential block %d data mismatch", blockIdx)
+	}
+
+	// Now test true concurrent reads
+	// Create a channel to collect results and a wait group to synchronize
+	type resultPair struct {
+		blockIdx int
+		values   []int64
+	}
+	resultChan := make(chan resultPair, numBlocks)
 	var wg sync.WaitGroup
-	// Create an error channel to collect errors
-	errChan := make(chan error, numBlocks)
-	// Create a mutex to protect the results map
-	var resultsMutex sync.Mutex
-	// Map to store results from each goroutine
-	results := make(map[int][]int64)
 
 	// Launch a goroutine for each block
 	for blockIdx := 0; blockIdx < numBlocks; blockIdx++ {
@@ -69,34 +99,42 @@ func TestConcurrentReads(t *testing.T) {
 			// Read the block
 			ids, values, err := reader.GetPairs(uint64(idx))
 			if err != nil {
-				errChan <- err
+				t.Errorf("Error reading block %d: %v", idx, err)
 				return
 			}
 
 			// Verify the number of entries
 			if len(ids) != entriesPerBlock || len(values) != entriesPerBlock {
-				errChan <- err
+				t.Errorf("Block %d: expected %d entries, got %d ids and %d values",
+					idx, entriesPerBlock, len(ids), len(values))
 				return
 			}
 
-			// Store the first few values for verification
-			resultsMutex.Lock()
-			results[idx] = values[:5]
-			resultsMutex.Unlock()
+			// Make a copy of the first few values to return
+			valuesCopy := make([]int64, 5)
+			copy(valuesCopy, values[:5])
+
+			// Send results to the channel
+			resultChan <- resultPair{idx, valuesCopy}
 		}(blockIdx)
 	}
 
-	// Wait for all goroutines to complete
-	wg.Wait()
-	close(errChan)
+	// Close the channel once all goroutines are done
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
 
-	// Check for errors
-	for err := range errChan {
-		assert.NoError(t, err)
+	// Collect and verify results
+	concurrentResults := make(map[int][]int64)
+	for result := range resultChan {
+		concurrentResults[result.blockIdx] = result.values
 	}
 
-	// Verify the results
-	assert.Equal(t, numBlocks, len(results))
+	// Verify all blocks were processed
+	assert.Equal(t, numBlocks, len(concurrentResults))
+
+	// Compare concurrent results with sequential results
 	for blockIdx := 0; blockIdx < numBlocks; blockIdx++ {
 		baseValue := int64(blockIdx * entriesPerBlock * 10)
 		expected := []int64{
@@ -106,7 +144,12 @@ func TestConcurrentReads(t *testing.T) {
 			baseValue + 30,
 			baseValue + 40,
 		}
-		assert.Equal(t, expected, results[blockIdx])
+
+		// Results should match both expected values and sequential results
+		assert.Equal(t, expected, concurrentResults[blockIdx],
+			"Block %d: Expected vs concurrent mismatch", blockIdx)
+		assert.Equal(t, sequentialResults[blockIdx], concurrentResults[blockIdx],
+			"Block %d: Sequential vs concurrent mismatch", blockIdx)
 	}
 }
 
