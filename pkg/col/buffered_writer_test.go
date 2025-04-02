@@ -4,232 +4,15 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// // TestBufferedWriterLikeFeatures tests the Writer API to demonstrate what the BufferedWriter should do
-// // This test properly tests the functionality that the BufferedWriter is intended to provide,
-// // but uses the Writer API which is known to work.
-// func TestBufferedWriterLikeFeatures(t *testing.T) {
-// 	tempDir := t.TempDir()
-// 	filePath := filepath.Join(tempDir, "test_writer.col")
-
-// 	// Create a new writer
-// 	writer, err := NewWriter(filePath, WithEncoding(EncodingRaw))
-// 	require.NoError(t, err)
-
-// 	// Add some data in batches
-// 	for i := 0; i < 100; i++ {
-// 		// Each "batch" is a separate block with Writer
-// 		err = writer.WriteBlock(
-// 			[]uint64{uint64(i)},
-// 			[]int64{int64(i * 10)},
-// 		)
-// 		require.NoError(t, err)
-// 	}
-
-// 	// Finalize and close the writer
-// 	err = writer.FinalizeAndClose()
-// 	require.NoError(t, err)
-
-// 	// Verify the file was created
-// 	_, err = os.Stat(filePath)
-// 	require.NoError(t, err)
-
-// 	// Open the file and verify its contents
-// 	reader, err := NewReader(filePath)
-// 	require.NoError(t, err)
-// 	defer reader.Close()
-
-// 	// Check version
-// 	assert.Equal(t, Version, reader.Version())
-
-// 	// Check block count - Writer creates one block per WriteBlock call
-// 	blockCount := reader.BlockCount()
-// 	assert.Equal(t, uint64(100), blockCount, "Should have 100 blocks")
-
-// 	// Verify data integrity
-// 	for i := 0; i < 100; i++ {
-// 		ids, values, err := reader.GetPairs(uint64(i))
-// 		require.NoError(t, err)
-// 		require.Equal(t, 1, len(ids), "Block should contain exactly 1 ID")
-// 		require.Equal(t, 1, len(values), "Block should contain exactly 1 value")
-// 		assert.Equal(t, uint64(i), ids[0], "ID should match")
-// 		assert.Equal(t, int64(i*10), values[0], "Value should match")
-// 	}
-// }
-
-// // TestBufferedWriterLikeBatching demonstrates batching functionality similar
-// // to what BufferedWriter should provide
-// func TestBufferedWriterLikeBatching(t *testing.T) {
-// 	tempDir := t.TempDir()
-// 	filePath := filepath.Join(tempDir, "test_batching.col")
-
-// 	// Create a new writer
-// 	writer, err := NewWriter(filePath, WithEncoding(EncodingRaw))
-// 	require.NoError(t, err)
-
-// 	// Write first batch as a block
-// 	ids1 := make([]uint64, 50)
-// 	values1 := make([]int64, 50)
-// 	for i := 0; i < 50; i++ {
-// 		ids1[i] = uint64(i)
-// 		values1[i] = int64(i * 10)
-// 	}
-// 	err = writer.WriteBlock(ids1, values1)
-// 	require.NoError(t, err)
-
-// 	// Write second batch as a block
-// 	ids2 := make([]uint64, 50)
-// 	values2 := make([]int64, 50)
-// 	for i := 0; i < 50; i++ {
-// 		ids2[i] = uint64(i + 50)
-// 		values2[i] = int64((i + 50) * 10)
-// 	}
-// 	err = writer.WriteBlock(ids2, values2)
-// 	require.NoError(t, err)
-
-// 	// Finalize the writer
-// 	err = writer.FinalizeAndClose()
-// 	require.NoError(t, err)
-
-// 	// Verify the file was created
-// 	_, err = os.Stat(filePath)
-// 	require.NoError(t, err)
-
-// 	// Open the file and verify its contents
-// 	reader, err := NewReader(filePath)
-// 	require.NoError(t, err)
-// 	defer reader.Close()
-
-// 	// Check block count
-// 	blockCount := reader.BlockCount()
-// 	assert.Equal(t, uint64(2), blockCount, "Should have 2 blocks")
-
-// 	// Verify first block
-// 	ids, values, err := reader.GetPairs(0)
-// 	require.NoError(t, err)
-// 	assert.Equal(t, 50, len(ids), "First block should contain 50 IDs")
-// 	for i := 0; i < 50; i++ {
-// 		assert.Equal(t, uint64(i), ids[i], "ID should match")
-// 		assert.Equal(t, int64(i*10), values[i], "Value should match")
-// 	}
-
-// 	// Verify second block
-// 	ids, values, err = reader.GetPairs(1)
-// 	require.NoError(t, err)
-// 	assert.Equal(t, 50, len(ids), "Second block should contain 50 IDs")
-// 	for i := 0; i < 50; i++ {
-// 		assert.Equal(t, uint64(i+50), ids[i], "ID should match")
-// 		assert.Equal(t, int64((i+50)*10), values[i], "Value should match")
-// 	}
-// }
-
-// // TestBufferedWriterLikeEncoding demonstrates the BufferedWriter-like handling
-// // of different encodings
-// func TestBufferedWriterLikeEncoding(t *testing.T) {
-// 	tempDir := t.TempDir()
-// 	filePath := filepath.Join(tempDir, "test_encoding.col")
-
-// 	// Create a writer with EncodingRaw
-// 	writer, err := NewWriter(filePath, WithEncoding(EncodingRaw))
-// 	require.NoError(t, err)
-
-// 	// Add data with negative values
-// 	ids := make([]uint64, 100)
-// 	values := make([]int64, 100)
-// 	for i := 0; i < 100; i++ {
-// 		ids[i] = uint64(i)
-// 		values[i] = int64(i) * -5 // Use negative values to test int64 encoding
-// 	}
-// 	err = writer.WriteBlock(ids, values)
-// 	require.NoError(t, err)
-
-// 	// Finalize the writer
-// 	err = writer.FinalizeAndClose()
-// 	require.NoError(t, err)
-
-// 	// Open the file and verify its contents
-// 	reader, err := NewReader(filePath)
-// 	require.NoError(t, err)
-// 	defer reader.Close()
-
-// 	// Check encoding type
-// 	assert.Equal(t, EncodingRaw, reader.EncodingType())
-
-// 	// Verify data integrity
-// 	ids, values, err = reader.GetPairs(0)
-// 	require.NoError(t, err)
-// 	assert.Equal(t, 100, len(ids), "Block should contain 100 IDs")
-// 	for i := 0; i < 100; i++ {
-// 		assert.Equal(t, uint64(i), ids[i], "ID should match")
-// 		assert.Equal(t, int64(i)*-5, values[i], "Value should match")
-// 	}
-// }
-
-// // TestBufferedWriterLikeFlush simulates flush by writing multiple blocks
-// func TestBufferedWriterLikeFlush(t *testing.T) {
-// 	tempDir := t.TempDir()
-// 	filePath := filepath.Join(tempDir, "test_flush.col")
-
-// 	// Create a writer
-// 	writer, err := NewWriter(filePath, WithEncoding(EncodingRaw))
-// 	require.NoError(t, err)
-
-// 	// Add first batch of data
-// 	ids1 := make([]uint64, 50)
-// 	values1 := make([]int64, 50)
-// 	for i := 0; i < 50; i++ {
-// 		ids1[i] = uint64(i)
-// 		values1[i] = int64(i * 10)
-// 	}
-// 	err = writer.WriteBlock(ids1, values1)
-// 	require.NoError(t, err)
-
-// 	// Add second batch of data
-// 	ids2 := make([]uint64, 50)
-// 	values2 := make([]int64, 50)
-// 	for i := 0; i < 50; i++ {
-// 		ids2[i] = uint64(i + 50)
-// 		values2[i] = int64((i + 50) * 10)
-// 	}
-// 	err = writer.WriteBlock(ids2, values2)
-// 	require.NoError(t, err)
-
-// 	// Finalize the writer
-// 	err = writer.FinalizeAndClose()
-// 	require.NoError(t, err)
-
-// 	// Open the file and verify its contents
-// 	reader, err := NewReader(filePath)
-// 	require.NoError(t, err)
-// 	defer reader.Close()
-
-// 	// Check block count
-// 	blockCount := reader.BlockCount()
-// 	assert.Equal(t, uint64(2), blockCount, "Should have 2 blocks")
-
-// 	// Verify all data (100 items total)
-// 	totalItems := 0
-// 	for i := uint64(0); i < blockCount; i++ {
-// 		ids, values, err := reader.GetPairs(i)
-// 		require.NoError(t, err)
-// 		totalItems += len(ids)
-
-// 		// Verify data integrity for this block
-// 		for j := 0; j < len(ids); j++ {
-// 			id := ids[j]
-// 			value := values[j]
-// 			assert.Equal(t, int64(id*10), value, "Value should be ID*10")
-// 		}
-// 	}
-// 	assert.Equal(t, 100, totalItems, "Should have 100 items total")
-// }
 
 func TestCompareWriterImplementations(t *testing.T) {
 	tests := []struct {
@@ -387,7 +170,7 @@ func compareWriters(t *testing.T, ids []uint64, values []int64, encodingType uin
 
 	// Create files with BufferedWriter
 	bufferedFile := filepath.Join(tempDir, "buffered.col")
-	bufferedWriter, err := NewBufferedWriter(bufferedFile, WithBufferedEncoding(encodingType))
+	bufferedWriter, err := NewBufferedWriter(bufferedFile, WithBufferedBlockSize(128*1024), WithBufferedEncoding(encodingType)) // 128KB blocks and same encoding type
 	require.NoError(t, err)
 
 	// Use WriteBlock directly instead of adding items one by one
@@ -611,7 +394,7 @@ func TestBufferedWriterBasics(t *testing.T) {
 
 	// Create a new buffered writer
 	t.Logf("Creating buffered writer for file: %s", tempFile.Name())
-	writer, err := NewBufferedWriter(tempFile.Name(), WithBufferedEncoding(EncodingRaw))
+	writer, err := NewBufferedWriter(tempFile.Name(), WithBufferedBlockSize(128*1024)) // 128KB blocks
 	require.NoError(t, err)
 
 	// Write a block directly
@@ -679,4 +462,176 @@ func generateSequentialValues(start, count int) []int64 {
 		values[i] = int64((start + i) * 30)
 	}
 	return values
+}
+
+// TestLargeBufferedWrite tests adding a large number of entries with the buffered writer
+// and analyzes the resulting block statistics
+func TestLargeBufferedWrite(t *testing.T) {
+	const numEntries = 100000
+
+	// Create a temporary file for testing
+	f, err := os.CreateTemp("", "test-large-bufferedwriter-*.col")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+
+	// Create a buffered writer
+	bufferedWriter, err := NewBufferedWriter(f.Name(), WithBufferedBlockSize(16*1024)) // 16KB blocks
+	if err != nil {
+		t.Fatalf("Failed to create buffered writer: %v", err)
+	}
+
+	// Generate test data
+	t.Logf("Adding %d entries to buffered writer", numEntries)
+	var ids []uint64
+	var values []int64
+
+	for i := 0; i < numEntries; i++ {
+		ids = append(ids, uint64(i+1))
+		values = append(values, int64(i*10))
+	}
+
+	// Add entries in batches to avoid potential memory issues
+	const batchSize = 5000
+	for i := 0; i < numEntries; i += batchSize {
+		end := i + batchSize
+		if end > numEntries {
+			end = numEntries
+		}
+
+		// Add entries one by one within the batch
+		for j := i; j < end; j++ {
+			err = bufferedWriter.Add(ids[j], values[j])
+			if err != nil {
+				t.Fatalf("Failed to add entry %d: %v", j, err)
+			}
+		}
+	}
+
+	// Close the writer to finalize the file
+	err = bufferedWriter.Close()
+	if err != nil {
+		t.Fatalf("Failed to close writer: %v", err)
+	}
+
+	// Reopen the file for reading
+	f, err = os.Open(f.Name())
+	if err != nil {
+		t.Fatalf("Failed to reopen file: %v", err)
+	}
+	defer f.Close()
+
+	// Create a reader
+	reader, err := NewReader(f.Name())
+	if err != nil {
+		t.Fatalf("Failed to create reader: %v", err)
+	}
+
+	// Get file size
+	fileInfo, err := f.Stat()
+	if err != nil {
+		t.Fatalf("Failed to get file stats: %v", err)
+	}
+	t.Logf("File size: %d bytes", fileInfo.Size())
+
+	// Analyze the blocks
+	blockCount := len(reader.blockIndex)
+	t.Logf("Total blocks: %d", blockCount)
+
+	// Calculate statistics
+	totalEntries := 0
+	minBlockSize := int64(math.MaxInt64)
+	maxBlockSize := int64(0)
+	totalBlockSize := int64(0)
+
+	minEntriesPerBlock := math.MaxInt64
+	maxEntriesPerBlock := 0
+
+	// Block size distribution buckets (in KB)
+	sizeDistribution := make(map[int]int)
+
+	for i := 0; i < blockCount; i++ {
+		blockOffset := reader.blockIndex[i].BlockOffset
+		blockSize := int64(reader.blockIndex[i].BlockSize)
+		entriesCount := int(reader.blockIndex[i].Count)
+
+		totalEntries += entriesCount
+		totalBlockSize += blockSize
+
+		if blockSize < minBlockSize {
+			minBlockSize = blockSize
+		}
+		if blockSize > maxBlockSize {
+			maxBlockSize = blockSize
+		}
+
+		if entriesCount < minEntriesPerBlock {
+			minEntriesPerBlock = entriesCount
+		}
+		if entriesCount > maxEntriesPerBlock {
+			maxEntriesPerBlock = entriesCount
+		}
+
+		// Record in distribution buckets (round to nearest KB)
+		sizeInKB := int(blockSize / 1024)
+		sizeDistribution[sizeInKB]++
+
+		// Print detailed info for first few and last few blocks
+		if i < 3 || i >= blockCount-3 {
+			t.Logf("Block %d: Offset=%d, Size=%d bytes, Entries=%d",
+				i, blockOffset, blockSize, entriesCount)
+		} else if i == 3 && blockCount > 6 {
+			t.Logf("... skipping %d blocks ...", blockCount-6)
+		}
+	}
+
+	// Calculate and display statistics
+	var avgBlockSize float64
+	var avgEntriesPerBlock float64
+
+	if blockCount > 0 {
+		avgBlockSize = float64(totalBlockSize) / float64(blockCount)
+		avgEntriesPerBlock = float64(totalEntries) / float64(blockCount)
+	}
+
+	t.Logf("Block size statistics:")
+	if blockCount > 0 {
+		t.Logf("  Min: %d bytes", minBlockSize)
+		t.Logf("  Max: %d bytes", maxBlockSize)
+		t.Logf("  Avg: %.2f bytes", avgBlockSize)
+	} else {
+		t.Logf("  No blocks found")
+	}
+	t.Logf("  Total: %d bytes", totalBlockSize)
+
+	t.Logf("Entries per block statistics:")
+	if blockCount > 0 {
+		t.Logf("  Min: %d entries", minEntriesPerBlock)
+		t.Logf("  Max: %d entries", maxEntriesPerBlock)
+		t.Logf("  Avg: %.2f entries", avgEntriesPerBlock)
+	} else {
+		t.Logf("  No blocks found")
+	}
+	t.Logf("  Total: %d entries", totalEntries)
+
+	// Sort and display size distribution
+	var sizes []int
+	for size := range sizeDistribution {
+		sizes = append(sizes, size)
+	}
+	sort.Ints(sizes)
+
+	t.Logf("Block size distribution (KB):")
+	for _, size := range sizes {
+		count := sizeDistribution[size]
+		percentage := float64(count) / float64(blockCount) * 100
+		t.Logf("  %d KB: %d blocks (%.1f%%)", size, count, percentage)
+	}
+
+	// Verify correct number of entries
+	if totalEntries != numEntries {
+		t.Errorf("Expected %d total entries, got %d", numEntries, totalEntries)
+	}
 }

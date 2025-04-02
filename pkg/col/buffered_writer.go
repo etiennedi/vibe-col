@@ -82,6 +82,16 @@ func (bw *BufferedWriter) Add(id uint64, value int64) error {
 		return fmt.Errorf("writer is already closed")
 	}
 
+	// A write is going to be at most 16 bytes (8 bytes for ID, 8 bytes for
+	// value). It could technically be smaller if we're using varint encoding,
+	// but that's close enough and simplfiies the logic considerably.
+	if bw.CurrentBlockSize()+16 > bw.blockSizeTarget {
+		// flush first
+		if err := bw.Flush(); err != nil {
+			return fmt.Errorf("failed to flush: %w", err)
+		}
+	}
+
 	// Create a new BlockData for this single item if needed
 	if bw.pendingData == nil {
 		bw.pendingData = &BlockData{
@@ -192,4 +202,13 @@ func (bw *BufferedWriter) Add(id uint64, value int64) error {
 	bw.lastValue = value
 
 	return nil
+}
+
+func (bw *BufferedWriter) CurrentBlockSize() uint32 {
+	if bw.pendingData == nil {
+		return 0
+	}
+
+	// The size of a block is the combination of the block header, the layout, and the serialized id and values data
+	return uint32(blockHeaderSize + blockLayoutSize + len(bw.pendingData.SerializedIDSection) + len(bw.pendingData.SerializedValueSection))
 }
