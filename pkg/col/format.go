@@ -186,12 +186,153 @@ type BlockHeader struct {
 	// Reserved space - fills up to 64 bytes
 }
 
+// Serialize serializes the BlockHeader into a byte slice
+func (bh *BlockHeader) Serialize() []byte {
+	buf := make([]byte, 64)
+	offset := 0
+
+	// Write all fields directly into the buffer
+	binary.LittleEndian.PutUint64(buf[offset:], bh.MinID)
+	offset += uint64Size
+
+	binary.LittleEndian.PutUint64(buf[offset:], bh.MaxID)
+	offset += uint64Size
+
+	binary.LittleEndian.PutUint64(buf[offset:], bh.MinValue)
+	offset += uint64Size
+
+	binary.LittleEndian.PutUint64(buf[offset:], bh.MaxValue)
+	offset += uint64Size
+
+	binary.LittleEndian.PutUint64(buf[offset:], bh.Sum)
+	offset += uint64Size
+
+	binary.LittleEndian.PutUint32(buf[offset:], bh.Count)
+	offset += uint32Size
+
+	binary.LittleEndian.PutUint32(buf[offset:], bh.EncodingType)
+	offset += uint32Size
+
+	binary.LittleEndian.PutUint32(buf[offset:], uint32(bh.CompressionType))
+	offset += uint32Size
+
+	binary.LittleEndian.PutUint32(buf[offset:], bh.UncompressedSize)
+	offset += uint32Size
+
+	binary.LittleEndian.PutUint32(buf[offset:], bh.CompressedSize)
+	offset += uint32Size
+
+	binary.LittleEndian.PutUint64(buf[offset:], bh.Checksum)
+
+	return buf
+}
+
+// Deserialize deserializes a byte slice into the BlockHeader
+func (bh *BlockHeader) Deserialize(buf []byte) error {
+	if len(buf) < 64 {
+		return fmt.Errorf("buffer too small for BlockHeader: expected 64 bytes, got %d", len(buf))
+	}
+
+	offset := 0
+
+	// Read min ID
+	bh.MinID = binary.LittleEndian.Uint64(buf[offset:])
+	offset += uint64Size
+
+	// Read max ID
+	bh.MaxID = binary.LittleEndian.Uint64(buf[offset:])
+	offset += uint64Size
+
+	// Read min value
+	bh.MinValue = binary.LittleEndian.Uint64(buf[offset:])
+	offset += uint64Size
+
+	// Read max value
+	bh.MaxValue = binary.LittleEndian.Uint64(buf[offset:])
+	offset += uint64Size
+
+	// Read sum
+	bh.Sum = binary.LittleEndian.Uint64(buf[offset:])
+	offset += uint64Size
+
+	// Read count
+	bh.Count = binary.LittleEndian.Uint32(buf[offset:])
+	offset += uint32Size
+
+	// Read encoding type
+	bh.EncodingType = binary.LittleEndian.Uint32(buf[offset:])
+	offset += uint32Size
+
+	// Read compression type
+	bh.CompressionType = binary.LittleEndian.Uint32(buf[offset:])
+	offset += uint32Size
+
+	// Read uncompressed size
+	bh.UncompressedSize = binary.LittleEndian.Uint32(buf[offset:])
+	offset += uint32Size
+
+	// Read compressed size
+	bh.CompressedSize = binary.LittleEndian.Uint32(buf[offset:])
+	offset += uint32Size
+
+	// Read checksum
+	bh.Checksum = binary.LittleEndian.Uint64(buf[offset:])
+
+	return nil
+}
+
 // BlockLayout represents the layout of a block
 type BlockLayout struct {
 	IDSectionOffset    uint32
 	IDSectionSize      uint32
 	ValueSectionOffset uint32
 	ValueSectionSize   uint32
+}
+
+// Serialize serializes the BlockLayout into a byte slice
+func (bl *BlockLayout) Serialize() []byte {
+	buf := make([]byte, 16)
+	offset := 0
+
+	// Write all fields directly into the buffer
+	binary.LittleEndian.PutUint32(buf[offset:], bl.IDSectionOffset)
+	offset += uint32Size
+
+	binary.LittleEndian.PutUint32(buf[offset:], bl.IDSectionSize)
+	offset += uint32Size
+
+	binary.LittleEndian.PutUint32(buf[offset:], bl.ValueSectionOffset)
+	offset += uint32Size
+
+	binary.LittleEndian.PutUint32(buf[offset:], bl.ValueSectionSize)
+
+	return buf
+}
+
+// Deserialize deserializes a byte slice into the BlockLayout
+func (bl *BlockLayout) Deserialize(buf []byte) error {
+	if len(buf) < 16 {
+		return fmt.Errorf("buffer too small for BlockLayout: expected 16 bytes, got %d", len(buf))
+	}
+
+	offset := 0
+
+	// Read ID section offset
+	bl.IDSectionOffset = binary.LittleEndian.Uint32(buf[offset:])
+	offset += uint32Size
+
+	// Read ID section size
+	bl.IDSectionSize = binary.LittleEndian.Uint32(buf[offset:])
+	offset += uint32Size
+
+	// Read value section offset
+	bl.ValueSectionOffset = binary.LittleEndian.Uint32(buf[offset:])
+	offset += uint32Size
+
+	// Read value section size
+	bl.ValueSectionSize = binary.LittleEndian.Uint32(buf[offset:])
+
+	return nil
 }
 
 // FooterEntry represents an entry in the footer
@@ -204,6 +345,81 @@ type FooterEntry struct {
 	MaxValue    uint64 // Stored as uint64, but represents int64
 	Sum         uint64 // Stored as uint64, but represents int64
 	Count       uint32
+}
+
+// Serialize serializes the FooterEntry into a byte slice
+func (fe *FooterEntry) Serialize() []byte {
+	// Each footer entry is 56 bytes (8+4+8+8+8+8+8+4)
+	buf := make([]byte, 56)
+	offset := 0
+
+	// Write all fields directly into the buffer
+	binary.LittleEndian.PutUint64(buf[offset:], fe.BlockOffset)
+	offset += uint64Size
+
+	binary.LittleEndian.PutUint32(buf[offset:], fe.BlockSize)
+	offset += uint32Size
+
+	binary.LittleEndian.PutUint64(buf[offset:], fe.MinID)
+	offset += uint64Size
+
+	binary.LittleEndian.PutUint64(buf[offset:], fe.MaxID)
+	offset += uint64Size
+
+	binary.LittleEndian.PutUint64(buf[offset:], fe.MinValue)
+	offset += uint64Size
+
+	binary.LittleEndian.PutUint64(buf[offset:], fe.MaxValue)
+	offset += uint64Size
+
+	binary.LittleEndian.PutUint64(buf[offset:], fe.Sum)
+	offset += uint64Size
+
+	binary.LittleEndian.PutUint32(buf[offset:], fe.Count)
+
+	return buf
+}
+
+// Deserialize deserializes a byte slice into the FooterEntry
+func (fe *FooterEntry) Deserialize(buf []byte) error {
+	if len(buf) < 56 {
+		return fmt.Errorf("buffer too small for FooterEntry: expected 56 bytes, got %d", len(buf))
+	}
+
+	offset := 0
+
+	// Read block offset
+	fe.BlockOffset = binary.LittleEndian.Uint64(buf[offset:])
+	offset += uint64Size
+
+	// Read block size
+	fe.BlockSize = binary.LittleEndian.Uint32(buf[offset:])
+	offset += uint32Size
+
+	// Read min ID
+	fe.MinID = binary.LittleEndian.Uint64(buf[offset:])
+	offset += uint64Size
+
+	// Read max ID
+	fe.MaxID = binary.LittleEndian.Uint64(buf[offset:])
+	offset += uint64Size
+
+	// Read min value
+	fe.MinValue = binary.LittleEndian.Uint64(buf[offset:])
+	offset += uint64Size
+
+	// Read max value
+	fe.MaxValue = binary.LittleEndian.Uint64(buf[offset:])
+	offset += uint64Size
+
+	// Read sum
+	fe.Sum = binary.LittleEndian.Uint64(buf[offset:])
+	offset += uint64Size
+
+	// Read count
+	fe.Count = binary.LittleEndian.Uint32(buf[offset:])
+
+	return nil
 }
 
 // FooterMetadata represents the metadata at the end of the footer
