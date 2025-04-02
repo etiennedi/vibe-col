@@ -35,8 +35,6 @@ type BufferedWriter struct {
 	blockSizeTarget uint32
 	blockIndex      []FooterEntry // Detailed index of blocks
 	globalIDs       *sroar.Bitmap
-	globalMinID     uint64 // Global minimum ID
-	globalMaxID     uint64 // Global maximum ID
 	closed          bool
 
 	// BlockData to buffer data before writing to disk
