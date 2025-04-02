@@ -518,47 +518,6 @@ func compareWriters(t *testing.T, ids []uint64, values []int64, encodingType uin
 	return true
 }
 
-// hexDump creates a simple hex dump of data for debugging
-func hexDump(t *testing.T, data []byte) {
-	const bytesPerLine = 16
-
-	for i := 0; i < len(data); i += bytesPerLine {
-		end := i + bytesPerLine
-		if end > len(data) {
-			end = len(data)
-		}
-
-		line := fmt.Sprintf("%04x: ", i)
-		for j := i; j < end; j++ {
-			line += fmt.Sprintf("%02x ", data[j])
-			if j-i == 7 {
-				line += " " // Add extra space in the middle
-			}
-		}
-
-		// Pad with spaces if incomplete line
-		for j := end; j < i+bytesPerLine; j++ {
-			line += "   "
-			if j-i == 7 {
-				line += " "
-			}
-		}
-
-		// Add ASCII representation
-		line += " |"
-		for j := i; j < end; j++ {
-			if data[j] >= 32 && data[j] <= 126 {
-				line += fmt.Sprintf("%c", data[j])
-			} else {
-				line += "."
-			}
-		}
-		line += "|"
-
-		t.Logf("%s", line)
-	}
-}
-
 // analyzeFileDifferences attempts to analyze the differences between the standard and buffered files
 func analyzeFileDifferences(t *testing.T, standardFile, bufferedFile string) {
 	// If empty file paths are provided, skip file-specific analysis

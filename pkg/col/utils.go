@@ -51,22 +51,6 @@ func calculateSumInt64(values []int64) int64 {
 	return sum
 }
 
-// minUint64 returns the minimum of two uint64 values
-func minUint64(a, b uint64) uint64 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// maxUint64 returns the maximum of two uint64 values
-func maxUint64(a, b uint64) uint64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // minInt64 returns the minimum of two int64 values
 func minInt64(a, b int64) int64 {
 	if a < b {

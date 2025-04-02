@@ -7,14 +7,6 @@ import (
 	"github.com/weaviate/sroar"
 )
 
-// Helper function to get minimum of two ints - internal to writer.go
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // Writer writes a column file
 type Writer struct {
 	file            *os.File
