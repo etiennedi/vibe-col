@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"time"
 )
 
 // writeGlobalIDBitmap writes the global ID bitmap to the file
@@ -55,38 +56,6 @@ func (w *Writer) Finalize() error {
 	if err != nil {
 		return fmt.Errorf("failed to write global ID bitmap: %w", err)
 	}
-
-	// Update file header with final block count and bitmap information
-	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("failed to seek to start: %w", err)
-	}
-
-	// Create updated header
-	header := NewFileHeader(w.blockCount, w.blockSizeTarget, w.encodingType)
-	header.BitmapOffset = bitmapOffset
-	header.BitmapSize = bitmapSize
-
-	// Write header fields
-	headerFields := []interface{}{
-		header.Magic,
-		header.Version,
-		header.ColumnType,
-		header.BlockCount,
-		header.BlockSizeTarget,
-		header.CompressionType,
-		header.EncodingType,
-		header.CreationTime,
-		header.BitmapOffset,
-		header.BitmapSize,
-	}
-
-	// Write the fields we need to update
-	for i, field := range headerFields {
-		if err := binary.Write(w.file, binary.LittleEndian, field); err != nil {
-			return fmt.Errorf("failed to write header field %d: %w", i, err)
-		}
-	}
-	// Skip the rest of the header - unchanged fields
 
 	// Seek to the end to write the footer
 	if _, err := w.file.Seek(0, io.SeekEnd); err != nil {
@@ -159,45 +128,42 @@ func (w *Writer) Finalize() error {
 
 	// Calculate footer size
 	footerSize := footerEnd - footerStart
-	footerMetaStart := footerEnd
 
-	// Write footer metadata
-	if err := binary.Write(w.file, binary.LittleEndian, uint64(footerSize)); err != nil {
-		return fmt.Errorf("failed to write footer size: %w", err)
-	}
-	if err := binary.Write(w.file, binary.LittleEndian, uint64(0)); err != nil {
-		return fmt.Errorf("failed to write checksum: %w", err)
-	}
-	if err := binary.Write(w.file, binary.LittleEndian, MagicNumber); err != nil {
-		return fmt.Errorf("failed to write magic number: %w", err)
+	// Create footer metadata and serialize it
+	footerMeta := FooterMetadata{
+		FooterSize: uint64(footerSize),
+		Checksum:   uint64(0), // Checksum placeholder
+		Magic:      MagicNumber,
 	}
 
-	// Verify footer metadata size
-	footerMetaEnd, err := w.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return fmt.Errorf("failed to get footer metadata end position: %w", err)
+	// Serialize and write footer metadata
+	footerMetaBuf := footerMeta.Serialize()
+	if _, err := w.file.Write(footerMetaBuf); err != nil {
+		return fmt.Errorf("failed to write footer metadata: %w", err)
 	}
 
-	// The footer metadata consists of:
-	// - Footer size (8 bytes)
-	// - Checksum (8 bytes)
-	// - Magic number (8 bytes)
-	// Total: 24 bytes
-	footerMetaSize := footerMetaEnd - footerMetaStart
-	if footerMetaSize != 24 {
-		return fmt.Errorf("footer metadata size mismatch: expected=24, actual=%d", footerMetaSize)
+	// Update the header with final block count and bitmap information
+	return w.updateHeader(bitmapOffset, bitmapSize, footerStart)
+}
+
+// updateHeader updates the file header with the final information
+func (w *Writer) updateHeader(bitmapOffset, bitmapSize uint64, footerStart int64) error {
+	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("failed to seek to start: %w", err)
 	}
 
-	// Verify total footer size
-	totalFooterSize := footerMetaEnd - footerStart
-	if totalFooterSize != footerSize+24 {
-		return fmt.Errorf("total footer size mismatch: expected=%d, actual=%d",
-			footerSize+24, totalFooterSize)
-	}
+	// Create updated header
+	header := NewFileHeader(w.blockCount, w.blockSizeTarget, w.encodingType)
+	header.BitmapOffset = bitmapOffset
+	header.BitmapSize = bitmapSize
+	header.CreationTime = uint64(time.Now().Unix())
 
-	// Final sync to ensure everything is written to disk
-	if err := w.file.Sync(); err != nil {
-		return fmt.Errorf("failed to sync file during finalization: %w", err)
+	// Serialize the header with footer offset
+	headerBuf := header.SerializeWithFooterOffset(uint64(footerStart))
+
+	// Write the header
+	if _, err := w.file.Write(headerBuf); err != nil {
+		return fmt.Errorf("failed to write updated header: %w", err)
 	}
 
 	return nil

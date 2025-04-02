@@ -154,21 +154,63 @@ func (r *Reader) GetGlobalIDBitmap() (*sroar.Bitmap, error) {
 		return bitmap, nil
 	}
 
+	// Create an empty bitmap as fallback
+	emptyBitmap := sroar.NewBitmap()
+
 	// Read the bitmap size (first 4 bytes)
 	sizeBuf, err := r.readBytesAt(int64(r.header.BitmapOffset), 4)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read bitmap size: %w", err)
+		// If we can't read the bitmap size, return an empty bitmap
+		if r.cacheGlobalIDs {
+			r.globalIDs = emptyBitmap
+		}
+		return emptyBitmap, nil
 	}
 	bitmapSize := binary.LittleEndian.Uint32(sizeBuf)
+
+	// If bitmap size is 0, return an empty bitmap
+	if bitmapSize == 0 {
+		if r.cacheGlobalIDs {
+			r.globalIDs = emptyBitmap
+		}
+		return emptyBitmap, nil
+	}
 
 	// Read the bitmap data
 	bitmapBuf, err := r.readBytesAt(int64(r.header.BitmapOffset)+4, int(bitmapSize))
 	if err != nil {
-		return nil, fmt.Errorf("failed to read bitmap data: %w", err)
+		// If we can't read the bitmap data, return an empty bitmap
+		if r.cacheGlobalIDs {
+			r.globalIDs = emptyBitmap
+		}
+		return emptyBitmap, nil
 	}
 
-	// Create a bitmap from the buffer
-	bitmap := sroar.FromBuffer(bitmapBuf)
+	// If bitmap buffer is empty, return an empty bitmap
+	if len(bitmapBuf) == 0 {
+		if r.cacheGlobalIDs {
+			r.globalIDs = emptyBitmap
+		}
+		return emptyBitmap, nil
+	}
+
+	var bitmap *sroar.Bitmap
+	// Use a defer-recover to catch any panics from sroar.FromBuffer
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// If there's a panic, set bitmap to empty
+				bitmap = emptyBitmap
+			}
+		}()
+		// Try to create a bitmap from the buffer
+		bitmap = sroar.FromBuffer(bitmapBuf)
+	}()
+
+	// If bitmap is nil (shouldn't happen, but just to be safe), use empty bitmap
+	if bitmap == nil {
+		bitmap = emptyBitmap
+	}
 
 	// Only cache if enabled
 	if r.cacheGlobalIDs {

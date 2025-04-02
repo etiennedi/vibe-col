@@ -13,61 +13,19 @@ func (r *Reader) readHeader() error {
 		return fmt.Errorf("failed to read header: %w", err)
 	}
 
-	// Extract fields from the buffer
-	offset := 0
-
-	// Read magic number
-	r.header.Magic = readBufferedUint64(&headerBuf, offset)
-	offset += 8
-
-	// Read version
-	r.header.Version = readBufferedUint32(&headerBuf, offset)
-	offset += 4
-
-	// Read column type
-	r.header.ColumnType = readBufferedUint32(&headerBuf, offset)
-	offset += 4
-
-	// Read block count
-	r.header.BlockCount = readBufferedUint64(&headerBuf, offset)
-	offset += 8
-
-	// Read block size target
-	r.header.BlockSizeTarget = readBufferedUint32(&headerBuf, offset)
-	offset += 4
-
-	// Read compression type
-	r.header.CompressionType = readBufferedUint32(&headerBuf, offset)
-	offset += 4
-
-	// Read encoding type
-	r.header.EncodingType = readBufferedUint32(&headerBuf, offset)
-	offset += 4
-
-	// Read creation time
-	r.header.CreationTime = readBufferedUint64(&headerBuf, offset)
-	offset += 8
-
-	// Read bitmap offset
-	r.header.BitmapOffset = readBufferedUint64(&headerBuf, offset)
-	offset += 8
-
-	// Read bitmap size
-	r.header.BitmapSize = readBufferedUint64(&headerBuf, offset)
-	offset += 8
-
-	// Only try to read footer offset if there's enough bytes in the header buffer
-	if offset+8 <= len(headerBuf) {
-		// Read footer offset
-		r.header.FooterOffset = readBufferedUint64(&headerBuf, offset)
+	// Try to read an additional 8 bytes for the footer offset if available
+	var extendedHeaderBuf []byte
+	if r.fileSize >= int64(headerSize+8) {
+		extendedHeaderBuf, err = r.readBytesAt(0, headerSize+8)
+		if err == nil {
+			// Use the extended buffer if available
+			headerBuf = extendedHeaderBuf
+		}
 	}
 
-	// Validate header
-	if r.header.Magic != MagicNumber {
-		return fmt.Errorf("invalid magic number: 0x%X", r.header.Magic)
-	}
-	if r.header.Version != Version {
-		return fmt.Errorf("unsupported version: %d", r.header.Version)
+	// Deserialize the header
+	if err := r.header.Deserialize(headerBuf); err != nil {
+		return fmt.Errorf("failed to deserialize header: %w", err)
 	}
 
 	return nil
@@ -92,14 +50,9 @@ func (r *Reader) readFooter() error {
 			return fmt.Errorf("failed to read footer metadata: %w", err)
 		}
 
-		// Extract fields from the buffer
-		r.footerMeta.FooterSize = readBufferedUint64(&footerMetaBuf, 0)
-		r.footerMeta.Checksum = readBufferedUint64(&footerMetaBuf, 8)
-		r.footerMeta.Magic = readBufferedUint64(&footerMetaBuf, 16)
-
-		// Validate footer metadata
-		if r.footerMeta.Magic != MagicNumber {
-			return fmt.Errorf("invalid footer magic number: 0x%X", r.footerMeta.Magic)
+		// Deserialize footer metadata
+		if err := r.footerMeta.Deserialize(footerMetaBuf); err != nil {
+			return fmt.Errorf("failed to deserialize footer metadata: %w", err)
 		}
 
 		// Calculate the footer start position
@@ -127,14 +80,9 @@ func (r *Reader) readFooter() error {
 			return fmt.Errorf("failed to read footer metadata: %w", err)
 		}
 
-		// Extract fields from the buffer
-		r.footerMeta.FooterSize = readBufferedUint64(&footerMetaBuf, 0)
-		r.footerMeta.Checksum = readBufferedUint64(&footerMetaBuf, 8)
-		r.footerMeta.Magic = readBufferedUint64(&footerMetaBuf, 16)
-
-		// Validate footer metadata
-		if r.footerMeta.Magic != MagicNumber {
-			return fmt.Errorf("invalid footer magic number: 0x%X", r.footerMeta.Magic)
+		// Deserialize footer metadata
+		if err := r.footerMeta.Deserialize(footerMetaBuf); err != nil {
+			return fmt.Errorf("failed to deserialize footer metadata: %w", err)
 		}
 	}
 
@@ -167,7 +115,6 @@ func (r *Reader) readFooter() error {
 	r.blockIndex = make([]FooterEntry, blockIndexCount)
 	for i := uint32(0); i < blockIndexCount; i++ {
 		entryOffset := i * 56
-
 		r.blockIndex[i] = FooterEntry{
 			BlockOffset: readBufferedUint64(&blockIndexBuf, int(entryOffset)),
 			BlockSize:   readBufferedUint32(&blockIndexBuf, int(entryOffset+8)),

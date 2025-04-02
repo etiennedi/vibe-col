@@ -61,42 +61,8 @@ func (bw *BufferedWriter) writeHeader() error {
 	// Create the header with default values
 	header := NewFileHeader(0, bw.blockSizeTarget, bw.encodingType)
 
-	// Allocate a single buffer for the entire header (64 bytes)
-	headerBuf := make([]byte, headerSize)
-	offset := 0
-
-	// Write all fields directly into the buffer
-	binary.LittleEndian.PutUint64(headerBuf[offset:], header.Magic)
-	offset += 8
-
-	binary.LittleEndian.PutUint32(headerBuf[offset:], header.Version)
-	offset += 4
-
-	binary.LittleEndian.PutUint32(headerBuf[offset:], header.ColumnType)
-	offset += 4
-
-	binary.LittleEndian.PutUint64(headerBuf[offset:], header.BlockCount)
-	offset += 8
-
-	binary.LittleEndian.PutUint32(headerBuf[offset:], header.BlockSizeTarget)
-	offset += 4
-
-	binary.LittleEndian.PutUint32(headerBuf[offset:], header.CompressionType)
-	offset += 4
-
-	binary.LittleEndian.PutUint32(headerBuf[offset:], header.EncodingType)
-	offset += 4
-
-	binary.LittleEndian.PutUint64(headerBuf[offset:], header.CreationTime)
-	offset += 8
-
-	binary.LittleEndian.PutUint64(headerBuf[offset:], header.BitmapOffset)
-	offset += 8
-
-	binary.LittleEndian.PutUint64(headerBuf[offset:], header.BitmapSize)
-	offset += 8
-
-	// The rest of the buffer is already zeroed by make(), which serves as the reserved space
+	// Serialize the header
+	headerBuf := header.Serialize()
 
 	// Write the entire buffer at once
 	if _, err := bw.file.Write(headerBuf); err != nil {
@@ -213,13 +179,15 @@ func (bw *BufferedWriter) finalize() error {
 	// Calculate footer size
 	footerSize := footerEnd - footerStart
 
-	// Allocate buffer for footer metadata (24 bytes: footerSize + checksum + magic)
-	footerMetaBuf := make([]byte, 24)
-	binary.LittleEndian.PutUint64(footerMetaBuf[0:], uint64(footerSize))
-	binary.LittleEndian.PutUint64(footerMetaBuf[8:], uint64(0)) // checksum placeholder
-	binary.LittleEndian.PutUint64(footerMetaBuf[16:], MagicNumber)
+	// Create footer metadata and serialize it
+	footerMeta := FooterMetadata{
+		FooterSize: uint64(footerSize),
+		Checksum:   uint64(0), // Checksum placeholder
+		Magic:      MagicNumber,
+	}
 
-	// Write footer metadata
+	// Serialize and write footer metadata
+	footerMetaBuf := footerMeta.Serialize()
 	if _, err := bw.file.Write(footerMetaBuf); err != nil {
 		return fmt.Errorf("failed to write footer metadata: %w", err)
 	}
@@ -235,47 +203,8 @@ func (bw *BufferedWriter) finalize() error {
 	header.BitmapSize = bitmapSize
 	header.CreationTime = uint64(time.Now().Unix())
 
-	// Calculate total size needed for header plus footer offset
-	// headerSize (64 bytes) plus 8 bytes for the footer offset
-	totalHeaderSize := headerSize + 8
-
-	// Allocate a buffer for the header plus the footer offset
-	headerBuf := make([]byte, totalHeaderSize)
-	offset := 0
-
-	// Write all fields directly into the buffer
-	binary.LittleEndian.PutUint64(headerBuf[offset:], header.Magic)
-	offset += 8
-
-	binary.LittleEndian.PutUint32(headerBuf[offset:], header.Version)
-	offset += 4
-
-	binary.LittleEndian.PutUint32(headerBuf[offset:], header.ColumnType)
-	offset += 4
-
-	binary.LittleEndian.PutUint64(headerBuf[offset:], header.BlockCount)
-	offset += 8
-
-	binary.LittleEndian.PutUint32(headerBuf[offset:], header.BlockSizeTarget)
-	offset += 4
-
-	binary.LittleEndian.PutUint32(headerBuf[offset:], header.CompressionType)
-	offset += 4
-
-	binary.LittleEndian.PutUint32(headerBuf[offset:], header.EncodingType)
-	offset += 4
-
-	binary.LittleEndian.PutUint64(headerBuf[offset:], header.CreationTime)
-	offset += 8
-
-	binary.LittleEndian.PutUint64(headerBuf[offset:], header.BitmapOffset)
-	offset += 8
-
-	binary.LittleEndian.PutUint64(headerBuf[offset:], header.BitmapSize)
-	offset += 8
-
-	// Add footer offset after the header
-	binary.LittleEndian.PutUint64(headerBuf[offset:], uint64(footerStart))
+	// Serialize the header with footer offset
+	headerBuf := header.SerializeWithFooterOffset(uint64(footerStart))
 
 	// Write the header buffer
 	if _, err := bw.file.Write(headerBuf); err != nil {

@@ -1,7 +1,6 @@
 package col
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 )
@@ -17,36 +16,12 @@ func (w *Writer) writeHeader() error {
 	// Create the header with default values
 	header := NewFileHeader(0, w.blockSizeTarget, w.encodingType)
 
-	// Create a buffer for the header fields
-	headerFields := []interface{}{
-		header.Magic,
-		header.Version,
-		header.ColumnType,
-		header.BlockCount,
-		header.BlockSizeTarget,
-		header.CompressionType,
-		header.EncodingType,
-		header.CreationTime,
-		header.BitmapOffset,
-		header.BitmapSize,
-	}
+	// Serialize the header
+	headerBuf := header.Serialize()
 
-	// Write all header fields
-	for i, field := range headerFields {
-		if err := binary.Write(w.file, binary.LittleEndian, field); err != nil {
-			return fmt.Errorf("failed to write header field %d: %w", i, err)
-		}
-	}
-
-	// Calculate reserved space - sum of the sizes of the header fields we've written
-	headerFieldsSize := uint64Size + uint32Size + uint32Size + uint64Size +
-		uint32Size + uint32Size + uint32Size + uint64Size + uint64Size + uint64Size
-	reservedSize := headerSize - headerFieldsSize
-
-	// Write reserved space to fill up to 64 bytes
-	reserved := make([]byte, reservedSize)
-	if _, err := w.file.Write(reserved); err != nil {
-		return fmt.Errorf("failed to write reserved space: %w", err)
+	// Write the header buffer
+	if _, err := w.file.Write(headerBuf); err != nil {
+		return fmt.Errorf("failed to write header: %w", err)
 	}
 
 	// Verify header size
