@@ -3,7 +3,6 @@ package col
 import (
 	"encoding/binary"
 	"fmt"
-	"io"
 )
 
 // WriteBlock writes a block of ID-value pairs with alternative implementation
@@ -16,11 +15,8 @@ func (bw *BufferedWriter) WriteBlock(blockData *BlockData) error {
 	// everything from here on is almost an exact copy of
 	// Writer.writeBlockInternal. This can be unified TODO
 
-	// Write block header (64 bytes)
-	blockStart, err := bw.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return fmt.Errorf("failed to get block start position: %w", err)
-	}
+	// Use tracked position instead of Seek
+	blockStart := bw.currentPosition
 
 	// Convert int64 values to uint64 for storage
 
@@ -33,11 +29,12 @@ func (bw *BufferedWriter) WriteBlock(blockData *BlockData) error {
 		return fmt.Errorf("block header size mismatch: expected=%d, actual=%d",
 			len(headerBuf), n)
 	}
-	headerWritten := int64(0)
-	if n, err := bw.file.Write(headerBuf); err != nil {
+
+	// Use writeAndTrack instead of Write + Seek
+	if n, err := bw.writeAndTrack(headerBuf); err != nil {
 		return fmt.Errorf("failed to write block header: %w", err)
-	} else {
-		headerWritten += int64(n)
+	} else if n != len(headerBuf) {
+		return fmt.Errorf("failed to write full block header: wrote %d bytes, expected %d", n, len(headerBuf))
 	}
 
 	blockData.IDSectionSize = uint32(len(blockData.SerializedIDSection))
@@ -69,24 +66,14 @@ func (bw *BufferedWriter) WriteBlock(blockData *BlockData) error {
 	binary.LittleEndian.PutUint32(layoutBuf[12:16], blockData.ValueSectionSize)
 
 	// Write the layout buffer to file
-	bytesWritten, err := bw.file.Write(layoutBuf)
-	if err != nil {
+	if n, err := bw.writeAndTrack(layoutBuf); err != nil {
 		return fmt.Errorf("failed to write block layout: %w", err)
+	} else if n != len(layoutBuf) {
+		return fmt.Errorf("failed to write block layout: wrote %d bytes, expected %d", n, len(layoutBuf))
 	}
-	if bytesWritten != 16 {
-		return fmt.Errorf("failed to write block layout: wrote %d bytes, expected 16", bytesWritten)
-	}
-
-	// Start of data section - this position is important for checksum calculation
-	// when that feature is implemented
-	dataSectionStart, err := bw.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return fmt.Errorf("failed to get data section position: %w", err)
-	}
-	_ = dataSectionStart // Unused for now
 
 	// Write ID section directly from pre-serialized data
-	actualIdSectionSize, err := bw.file.Write(blockData.SerializedIDSection)
+	actualIdSectionSize, err := bw.writeAndTrack(blockData.SerializedIDSection)
 	if err != nil {
 		return fmt.Errorf("failed to write ID section: %w", err)
 	}
@@ -98,7 +85,7 @@ func (bw *BufferedWriter) WriteBlock(blockData *BlockData) error {
 	}
 
 	// Write Value section directly from pre-serialized data
-	actualValueSectionSize, err := bw.file.Write(blockData.SerializedValueSection)
+	actualValueSectionSize, err := bw.writeAndTrack(blockData.SerializedValueSection)
 	if err != nil {
 		return fmt.Errorf("failed to write value section: %w", err)
 	}
@@ -109,11 +96,8 @@ func (bw *BufferedWriter) WriteBlock(blockData *BlockData) error {
 			blockData.ValueSectionSize, actualValueSectionSize)
 	}
 
-	// Get end position to calculate block size
-	blockEnd, err := bw.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return fmt.Errorf("failed to get block end position: %w", err)
-	}
+	// Get end position from position tracker
+	blockEnd := bw.currentPosition
 
 	// Calculate actual block size
 	blockSize := uint64(blockEnd - blockStart)
@@ -125,13 +109,12 @@ func (bw *BufferedWriter) WriteBlock(blockData *BlockData) error {
 		paddingBuf := make([]byte, padding)
 
 		// Write padding bytes
-		_, err := bw.file.Write(paddingBuf)
-		if err != nil {
+		if _, err := bw.writeAndTrack(paddingBuf); err != nil {
 			return fmt.Errorf("failed to write padding bytes: %w", err)
 		}
 
 		// Update block end position and size after padding
-		blockEnd += padding
+		blockEnd = bw.currentPosition
 		blockSize += uint64(padding)
 	}
 

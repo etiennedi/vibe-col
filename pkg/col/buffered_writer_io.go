@@ -52,11 +52,8 @@ func (bw *BufferedWriter) Close() error {
 
 // writeHeader writes the file header to the file
 func (bw *BufferedWriter) writeHeader() error {
-	// Record start position to verify header size
-	headerStart, err := bw.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return fmt.Errorf("failed to get header start position: %w", err)
-	}
+	// Use tracked position - should be 0 at this point
+	headerStart := bw.currentPosition
 
 	// Create the header with default values
 	header := NewFileHeader(0, bw.blockSizeTarget, bw.encodingType)
@@ -64,18 +61,15 @@ func (bw *BufferedWriter) writeHeader() error {
 	// Serialize the header
 	headerBuf := header.Serialize()
 
-	// Write the entire buffer at once
-	if _, err := bw.file.Write(headerBuf); err != nil {
+	// Write the entire buffer at once and track position
+	if n, err := bw.writeAndTrack(headerBuf); err != nil {
 		return fmt.Errorf("failed to write header: %w", err)
+	} else if n != len(headerBuf) {
+		return fmt.Errorf("failed to write full header: wrote %d bytes, expected %d", n, len(headerBuf))
 	}
 
-	// Verify header size
-	headerEnd, err := bw.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return fmt.Errorf("failed to get header end position: %w", err)
-	}
-
-	// Calculate actual header size
+	// Calculate actual header size using tracked position
+	headerEnd := bw.currentPosition
 	actualHeaderSize := headerEnd - headerStart
 
 	// Validate header size
@@ -94,22 +88,19 @@ func (bw *BufferedWriter) finalize() error {
 		return fmt.Errorf("failed to write global ID bitmap: %w", err)
 	}
 
-	// Get current position - this is where the footer will start
-	footerStart, err := bw.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return fmt.Errorf("failed to get file position: %w", err)
-	}
+	// Get current position from tracker - this is where the footer will start
+	footerStart := bw.currentPosition
 
 	// Add padding if needed to align to page boundary
 	padding := calculatePadding(footerStart, PageSize)
 	if padding > 0 {
 		// Create padding buffer filled with zeros
 		paddingBuf := make([]byte, padding)
-		if _, err := bw.file.Write(paddingBuf); err != nil {
+		if _, err := bw.writeAndTrack(paddingBuf); err != nil {
 			return fmt.Errorf("failed to write padding bytes: %w", err)
 		}
 		// Update footer start position after padding
-		footerStart += padding
+		footerStart = bw.currentPosition
 	}
 
 	// Write block index count
@@ -122,7 +113,7 @@ func (bw *BufferedWriter) finalize() error {
 	// Allocate buffer for the block count (4 bytes)
 	blockCountBuf := make([]byte, 4)
 	binary.LittleEndian.PutUint32(blockCountBuf, blockCount)
-	if _, err := bw.file.Write(blockCountBuf); err != nil {
+	if _, err := bw.writeAndTrack(blockCountBuf); err != nil {
 		return fmt.Errorf("failed to write block index count: %w", err)
 	}
 
@@ -163,7 +154,7 @@ func (bw *BufferedWriter) finalize() error {
 		}
 
 		// Write all entries at once
-		if _, err := bw.file.Write(entriesBuf); err != nil {
+		if _, err := bw.writeAndTrack(entriesBuf); err != nil {
 			return fmt.Errorf("failed to write footer entries: %w", err)
 		}
 	} else {
@@ -171,10 +162,7 @@ func (bw *BufferedWriter) finalize() error {
 	}
 
 	// Get current position - end of footer content
-	footerEnd, err := bw.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return fmt.Errorf("failed to get file position: %w", err)
-	}
+	footerEnd := bw.currentPosition
 
 	// Calculate footer size
 	footerSize := footerEnd - footerStart
@@ -188,14 +176,18 @@ func (bw *BufferedWriter) finalize() error {
 
 	// Serialize and write footer metadata
 	footerMetaBuf := footerMeta.Serialize()
-	if _, err := bw.file.Write(footerMetaBuf); err != nil {
+	if _, err := bw.writeAndTrack(footerMetaBuf); err != nil {
 		return fmt.Errorf("failed to write footer metadata: %w", err)
 	}
 
 	// Go back and update the header with final information
+	// This is one place where we must use Seek since we're moving backward
 	if _, err := bw.file.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("failed to seek to start: %w", err)
 	}
+
+	// Update our position tracker
+	bw.currentPosition = 0
 
 	// Create updated header
 	header := NewFileHeader(uint64(blockCount), bw.blockSizeTarget, bw.encodingType)
@@ -206,8 +198,8 @@ func (bw *BufferedWriter) finalize() error {
 	// Serialize the header with footer offset
 	headerBuf := header.SerializeWithFooterOffset(uint64(footerStart))
 
-	// Write the header buffer
-	if _, err := bw.file.Write(headerBuf); err != nil {
+	// Write the header buffer and track position
+	if _, err := bw.writeAndTrack(headerBuf); err != nil {
 		return fmt.Errorf("failed to write updated header: %w", err)
 	}
 
@@ -221,11 +213,8 @@ func (bw *BufferedWriter) finalize() error {
 
 // writeGlobalIDBitmap writes the global ID bitmap and returns its offset and size
 func (bw *BufferedWriter) writeGlobalIDBitmap() (uint64, uint64, error) {
-	// Get current position for bitmap
-	bitmapOffset, err := bw.file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get bitmap offset: %w", err)
-	}
+	// Get current position from tracker
+	bitmapOffset := bw.currentPosition
 
 	// Serialize bitmap
 	bitmapData := bw.globalIDs.ToBuffer()
@@ -236,12 +225,12 @@ func (bw *BufferedWriter) writeGlobalIDBitmap() (uint64, uint64, error) {
 	binary.LittleEndian.PutUint32(bitmapSizeBuf, bitmapSize)
 
 	// Write bitmap size
-	if _, err := bw.file.Write(bitmapSizeBuf); err != nil {
+	if _, err := bw.writeAndTrack(bitmapSizeBuf); err != nil {
 		return 0, 0, fmt.Errorf("failed to write bitmap size: %w", err)
 	}
 
 	// Write the bitmap data
-	if _, err := bw.file.Write(bitmapData); err != nil {
+	if _, err := bw.writeAndTrack(bitmapData); err != nil {
 		return 0, 0, fmt.Errorf("failed to write bitmap data: %w", err)
 	}
 

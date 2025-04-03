@@ -37,6 +37,9 @@ type BufferedWriter struct {
 	globalIDs       *sroar.Bitmap
 	closed          bool
 
+	// Position tracking to reduce Seek operations
+	currentPosition int64
+
 	// BlockData to buffer data before writing to disk
 	pendingData *BlockData
 	lastID      uint64 // for delta encoding calculation
@@ -59,6 +62,7 @@ func NewBufferedWriter(filename string, options ...BufferedWriterOption) (*Buffe
 		blockIndex:      make([]FooterEntry, 0),
 		globalIDs:       sroar.NewBitmap(),
 		closed:          false,
+		currentPosition: 0,
 		pendingData:     nil,
 	}
 
@@ -369,4 +373,15 @@ func (bw *BufferedWriter) CurrentBlockSize() uint32 {
 
 	// The size of a block is the combination of the block header, the layout, and the serialized id and values data
 	return uint32(reservedSpace + blockHeaderSize + blockLayoutSize + len(bw.pendingData.SerializedIDSection) + len(bw.pendingData.SerializedValueSection))
+}
+
+// writeAndTrack writes data to the file and updates the position tracker
+// instead of using Seek(0, io.SeekCurrent) after each write
+func (bw *BufferedWriter) writeAndTrack(data []byte) (int, error) {
+	n, err := bw.file.Write(data)
+	if err != nil {
+		return n, err
+	}
+	bw.currentPosition += int64(n)
+	return n, nil
 }
