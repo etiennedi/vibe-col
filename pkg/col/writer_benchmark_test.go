@@ -93,9 +93,9 @@ func BenchmarkWriteBlock(b *testing.B) {
 }
 
 // BenchmarkSimpleWriter tests the performance of the SimpleWriter
-func BenchmarkSimpleWriter(b *testing.B) {
+func BenchmarkBufferedWriterForBatch(b *testing.B) {
 	// Create a temporary file for testing
-	tempFile, err := os.CreateTemp("", "benchmark-simple-write-*.col")
+	tempFile, err := os.CreateTemp("", "benchmark-buffered-batch-*.col")
 	if err != nil {
 		b.Fatalf("Failed to create temp file: %v", err)
 	}
@@ -121,18 +121,15 @@ func BenchmarkSimpleWriter(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
 				// Create a new writer for each iteration
-				writer, err := NewSimpleWriter(tempFile.Name())
+				writer, err := NewBufferedWriter(tempFile.Name(), WithBufferedBlockSize(1024*1024)) // 1MB
 				if err != nil {
 					b.Fatalf("Failed to create writer: %v", err)
 				}
 
-				// Set a larger block size for the benchmark
-				writer.SetTargetBlockSize(1024 * 1024) // 1MB
-
 				b.StartTimer()
 
 				// Measure the time to write the data
-				err = writer.Write(ids, values)
+				err = writer.BatchAdd(ids, values)
 
 				b.StopTimer()
 				writer.Close()

@@ -23,7 +23,7 @@ func TestFilteredAggregationProperties(t *testing.T) {
 	defer os.Remove(tempFilePath)
 
 	// Create writer with raw encoding
-	writer, err := NewSimpleWriter(tempFilePath, WithEncoding(EncodingRaw))
+	writer, err := NewBufferedWriter(tempFilePath, WithBufferedEncoding(EncodingRaw))
 	require.NoError(t, err)
 
 	// Generate test data with a mix of positive and negative values
@@ -50,7 +50,7 @@ func TestFilteredAggregationProperties(t *testing.T) {
 		if end > totalEntries {
 			end = totalEntries
 		}
-		err = writer.Write(allIDs[i:end], allValues[i:end])
+		err = writer.BatchAdd(allIDs[i:end], allValues[i:end])
 		require.NoError(t, err)
 	}
 

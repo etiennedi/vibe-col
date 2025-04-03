@@ -24,7 +24,7 @@ func TestParallelAggregation(t *testing.T) {
 	filePath := filepath.Join(tempDir, "parallel_test.col")
 
 	// Create a SimpleWriter with a smaller block size to ensure multiple blocks
-	simpleWriter, err := NewSimpleWriter(filePath, WithBlockSize(16*1024)) // 16KB blocks
+	simpleWriter, err := NewBufferedWriter(filePath, WithBufferedBlockSize(16*1024)) // 16KB blocks
 	require.NoError(t, err)
 
 	// Generate test data with 20,000 items (reduced from 100,000)
@@ -50,7 +50,7 @@ func TestParallelAggregation(t *testing.T) {
 			end = numItems
 		}
 
-		err = simpleWriter.Write(ids[i:end], values[i:end])
+		err = simpleWriter.BatchAdd(ids[i:end], values[i:end])
 		require.NoError(t, err, "Failed to write batch")
 	}
 
@@ -231,7 +231,7 @@ func TestParallelAggregationWithFilter(t *testing.T) {
 	filePath := filepath.Join(tempDir, "parallel_filter_test.col")
 
 	// Create a SimpleWriter with a smaller block size to ensure multiple blocks
-	simpleWriter, err := NewSimpleWriter(filePath, WithBlockSize(16*1024)) // 16KB blocks
+	simpleWriter, err := NewBufferedWriter(filePath, WithBufferedBlockSize(16*1024)) // 16KB blocks
 	require.NoError(t, err)
 
 	// Generate test data with 20,000 items (reduced from 100,000)
@@ -257,7 +257,7 @@ func TestParallelAggregationWithFilter(t *testing.T) {
 		}
 
 		// Use SimpleWriter which handles batching better
-		err = simpleWriter.Write(ids[i:end], values[i:end])
+		err = simpleWriter.BatchAdd(ids[i:end], values[i:end])
 		require.NoError(t, err, "Failed to write batch")
 	}
 

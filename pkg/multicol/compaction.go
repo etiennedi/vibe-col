@@ -6,17 +6,17 @@ import (
 	"vibe-lsm/pkg/col"
 )
 
-// CompactionOptions contains configuration options for the compaction process
+// CompactionOptions defines options for compaction
 type CompactionOptions struct {
 	TargetBlockSize int    // Target block size in number of entries (0 means use default)
 	EncodingType    uint32 // Encoding type to use for the output file (0 means use default)
 }
 
-// DefaultCompactionOptions returns the default options for compaction
+// DefaultCompactionOptions returns the default compaction options
 func DefaultCompactionOptions() CompactionOptions {
 	return CompactionOptions{
-		TargetBlockSize: 0, // Use the default block size from SimpleWriter (128KB)
-		EncodingType:    0, // Default encoding (raw)
+		TargetBlockSize: 0, // Use the default block size from BufferedWriter (128KB)
+		EncodingType:    0, // Use default encoding
 	}
 }
 
@@ -137,32 +137,25 @@ func (b *BlockBuffer) IsEmpty() bool {
 // The leftReader contains older data, and the rightReader contains newer data.
 // When the same ID appears in both segments, the value from the rightReader takes precedence.
 func Compact(leftReader, rightReader *col.Reader, outputPath string, opts CompactionOptions) error {
-	// Create the SimpleWriter with the specified encoding options
-	writerOptions := []col.WriterOption{}
+	// Create the BufferedWriter with the specified encoding options
+	writerOptions := []col.BufferedWriterOption{}
 
 	// If an encoding type is specified, use it
 	if opts.EncodingType != 0 {
-		writerOptions = append(writerOptions, col.WithEncoding(opts.EncodingType))
+		writerOptions = append(writerOptions, col.WithBufferedEncoding(opts.EncodingType))
 	}
 
 	// If a target block size is specified, use it
 	if opts.TargetBlockSize > 0 {
-		writerOptions = append(writerOptions, col.WithBlockSize(uint32(opts.TargetBlockSize)))
+		writerOptions = append(writerOptions, col.WithBufferedBlockSize(uint32(opts.TargetBlockSize)))
 	}
 
 	// Create the writer with the configured options
-	writer, err := col.NewSimpleWriter(outputPath, writerOptions...)
+	writer, err := col.NewBufferedWriter(outputPath, writerOptions...)
 	if err != nil {
 		return fmt.Errorf("failed to create output writer: %w", err)
 	}
 	defer writer.Close()
-
-	// If a target block size is specified, also set it on the SimpleWriter
-	if opts.TargetBlockSize > 0 {
-		if err := writer.SetTargetBlockSize(opts.TargetBlockSize); err != nil {
-			return fmt.Errorf("failed to set target block size: %w", err)
-		}
-	}
 
 	// Create iterators for both readers
 	leftIter := NewBlockIterator(leftReader)
@@ -217,7 +210,7 @@ func Compact(leftReader, rightReader *col.Reader, outputPath string, opts Compac
 
 		// Flush to writer when buffer reaches capacity
 		if len(batchIDs) >= bufferCap {
-			if err := writer.Write(batchIDs, batchValues); err != nil {
+			if err := writer.BatchAdd(batchIDs, batchValues); err != nil {
 				return fmt.Errorf("failed to write batch: %w", err)
 			}
 			// Reset the batch buffers
@@ -228,7 +221,7 @@ func Compact(leftReader, rightReader *col.Reader, outputPath string, opts Compac
 
 	// Write any remaining entries
 	if len(batchIDs) > 0 {
-		if err := writer.Write(batchIDs, batchValues); err != nil {
+		if err := writer.BatchAdd(batchIDs, batchValues); err != nil {
 			return fmt.Errorf("failed to write final batch: %w", err)
 		}
 	}

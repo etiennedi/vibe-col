@@ -167,13 +167,13 @@ func TestVarintEncodingCompression(t *testing.T) {
 	}
 
 	// Write with raw encoding first using SimpleWriter
-	rawWriter, err := NewSimpleWriter(tempFileRawName, WithEncoding(EncodingRaw))
+	rawWriter, err := NewBufferedWriter(tempFileRawName, WithBufferedEncoding(EncodingRaw))
 	if err != nil {
 		t.Fatalf("Failed to create raw writer: %v", err)
 	}
 
 	// Write all items at once
-	err = rawWriter.Write(ids, values)
+	err = rawWriter.BatchAdd(ids, values)
 	if err != nil {
 		t.Fatalf("Failed to write raw data: %v", err)
 	}
@@ -183,13 +183,13 @@ func TestVarintEncodingCompression(t *testing.T) {
 	}
 
 	// Write with varint encoding using SimpleWriter
-	varIntWriter, err := NewSimpleWriter(tempFileVarIntName, WithEncoding(EncodingVarIntBoth))
+	varIntWriter, err := NewBufferedWriter(tempFileVarIntName, WithBufferedEncoding(EncodingVarIntBoth))
 	if err != nil {
 		t.Fatalf("Failed to create varint writer: %v", err)
 	}
 
 	// Write all items at once
-	err = varIntWriter.Write(ids, values)
+	err = varIntWriter.BatchAdd(ids, values)
 	if err != nil {
 		t.Fatalf("Failed to write varint data: %v", err)
 	}
@@ -321,13 +321,13 @@ func TestVarintEncodingCompression_RealWorldData(t *testing.T) {
 	}
 
 	// Write with raw encoding first using SimpleWriter
-	rawWriter, err := NewSimpleWriter(tempFileRawName, WithEncoding(EncodingRaw))
+	rawWriter, err := NewBufferedWriter(tempFileRawName, WithBufferedEncoding(EncodingRaw))
 	if err != nil {
 		t.Fatalf("Failed to create raw writer: %v", err)
 	}
 
 	// Write all items at once
-	err = rawWriter.Write(ids, values)
+	err = rawWriter.BatchAdd(ids, values)
 	if err != nil {
 		t.Fatalf("Failed to write raw data: %v", err)
 	}
@@ -337,13 +337,13 @@ func TestVarintEncodingCompression_RealWorldData(t *testing.T) {
 	}
 
 	// Write with varint encoding using SimpleWriter
-	varIntWriter, err := NewSimpleWriter(tempFileVarIntName, WithEncoding(EncodingVarIntBoth))
+	varIntWriter, err := NewBufferedWriter(tempFileVarIntName, WithBufferedEncoding(EncodingVarIntBoth))
 	if err != nil {
 		t.Fatalf("Failed to create varint writer: %v", err)
 	}
 
 	// Write all items at once
-	err = varIntWriter.Write(ids, values)
+	err = varIntWriter.BatchAdd(ids, values)
 	if err != nil {
 		t.Fatalf("Failed to write varint data: %v", err)
 	}

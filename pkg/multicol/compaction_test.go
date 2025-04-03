@@ -58,12 +58,12 @@ func TestCompaction(t *testing.T) {
 
 // Helper function to create the left segment with test data
 func createLeftSegment(t *testing.T, path string) {
-	writer, err := col.NewSimpleWriter(path)
+	writer, err := col.NewBufferedWriter(path)
 	require.NoError(t, err)
 
 	// Create a single block with all IDs
 	// Values are ID * 10
-	err = writer.Write([]uint64{1, 5, 10, 15, 20, 25}, []int64{10, 50, 100, 150, 200, 250})
+	err = writer.BatchAdd([]uint64{1, 5, 10, 15, 20, 25}, []int64{10, 50, 100, 150, 200, 250})
 	require.NoError(t, err)
 
 	err = writer.Close()
@@ -73,12 +73,12 @@ func createLeftSegment(t *testing.T, path string) {
 // Helper function to create the right segment with test data
 // Some IDs overlap with the left segment
 func createRightSegment(t *testing.T, path string) {
-	writer, err := col.NewSimpleWriter(path)
+	writer, err := col.NewBufferedWriter(path)
 	require.NoError(t, err)
 
 	// Create a single block with all IDs
 	// Values are ID * 11 (different from left to verify precedence)
-	err = writer.Write([]uint64{5, 7, 20, 30}, []int64{55, 77, 220, 330})
+	err = writer.BatchAdd([]uint64{5, 7, 20, 30}, []int64{55, 77, 220, 330})
 	require.NoError(t, err)
 
 	err = writer.Close()
@@ -194,7 +194,7 @@ func TestCompactionLargeDatasets(t *testing.T) {
 
 // Helper function to create a larger left segment
 func createLargeLeftSegment(t *testing.T, path string, encodingType uint32) {
-	writer, err := col.NewSimpleWriter(path, col.WithEncoding(encodingType))
+	writer, err := col.NewBufferedWriter(path, col.WithBufferedEncoding(encodingType))
 	require.NoError(t, err)
 
 	// Create sequence of IDs with some patterns:
@@ -210,7 +210,7 @@ func createLargeLeftSegment(t *testing.T, path string, encodingType uint32) {
 	}
 
 	// Write all sequential IDs at once
-	err = writer.Write(ids, values)
+	err = writer.BatchAdd(ids, values)
 	require.NoError(t, err)
 
 	// Sparse IDs 1000-2000 (every 10)
@@ -222,7 +222,7 @@ func createLargeLeftSegment(t *testing.T, path string, encodingType uint32) {
 	}
 
 	// Write the sparse IDs
-	err = writer.Write(sparseIDs, sparseValues)
+	err = writer.BatchAdd(sparseIDs, sparseValues)
 	require.NoError(t, err)
 
 	err = writer.Close()
@@ -231,7 +231,7 @@ func createLargeLeftSegment(t *testing.T, path string, encodingType uint32) {
 
 // Helper function to create a larger right segment with some overlapping IDs
 func createLargeRightSegment(t *testing.T, path string, encodingType uint32) {
-	writer, err := col.NewSimpleWriter(path, col.WithEncoding(encodingType))
+	writer, err := col.NewBufferedWriter(path, col.WithBufferedEncoding(encodingType))
 	require.NoError(t, err)
 
 	// Create different patterns:
@@ -248,7 +248,7 @@ func createLargeRightSegment(t *testing.T, path string, encodingType uint32) {
 	}
 
 	// Write all overlapping IDs at once
-	err = writer.Write(overlapIDs, overlapValues)
+	err = writer.BatchAdd(overlapIDs, overlapValues)
 	require.NoError(t, err)
 
 	// Every 20th ID from 1000-2000
@@ -259,7 +259,7 @@ func createLargeRightSegment(t *testing.T, path string, encodingType uint32) {
 		sparseOverlapValues[i] = int64(1000+i*20) * 11 // Value = ID * 11
 	}
 
-	err = writer.Write(sparseOverlapIDs, sparseOverlapValues)
+	err = writer.BatchAdd(sparseOverlapIDs, sparseOverlapValues)
 	require.NoError(t, err)
 
 	// New IDs from 3000-3500
@@ -271,7 +271,7 @@ func createLargeRightSegment(t *testing.T, path string, encodingType uint32) {
 	}
 
 	// Write all new IDs at once
-	err = writer.Write(newIDs, newValues)
+	err = writer.BatchAdd(newIDs, newValues)
 	require.NoError(t, err)
 
 	err = writer.Close()
@@ -466,7 +466,7 @@ func TestCompactionVariousScales(t *testing.T) {
 
 // Helper function to create a segment with a specific number of entries
 func createScaledSegment(t *testing.T, path string, numEntries int, isLeft bool, encodingType uint32) {
-	writer, err := col.NewSimpleWriter(path, col.WithEncoding(encodingType))
+	writer, err := col.NewBufferedWriter(path, col.WithBufferedEncoding(encodingType))
 	require.NoError(t, err)
 
 	// SimpleWriter uses a default target block size of 128KB
@@ -511,7 +511,7 @@ func createScaledSegment(t *testing.T, path string, numEntries int, isLeft bool,
 
 		// Write all entries at once
 		startWrite := time.Now()
-		err := writer.Write(ids, values)
+		err := writer.BatchAdd(ids, values)
 		require.NoError(t, err)
 		t.Logf("Wrote %d entries in %.3fs", numEntries, time.Since(startWrite).Seconds())
 
@@ -546,7 +546,7 @@ func createScaledSegment(t *testing.T, path string, numEntries int, isLeft bool,
 
 			// Write this batch
 			startWrite := time.Now()
-			err := writer.Write(ids, values)
+			err := writer.BatchAdd(ids, values)
 			require.NoError(t, err)
 			t.Logf("Wrote batch of %d entries in %.3fs", currentBatchSize, time.Since(startWrite).Seconds())
 
@@ -558,8 +558,7 @@ func createScaledSegment(t *testing.T, path string, numEntries int, isLeft bool,
 	}
 
 	// After all writes, log stats about the writer before closing
-	t.Logf("Created segment with %d entries in %d batches, writer stats: total items=%d",
-		totalEntries, batchCount, writer.TotalItems())
+	t.Logf("Created segment with %d entries in %d batches", totalEntries, batchCount)
 
 	// Close the writer
 	closeStart := time.Now()
@@ -820,7 +819,7 @@ func TestBlockSizes(t *testing.T) {
 
 // Helper function to create a segment with test data for block size testing
 func createTestSegment(t *testing.T, path string, numEntries int, isLeft bool, encodingType uint32) {
-	writer, err := col.NewSimpleWriter(path, col.WithEncoding(encodingType))
+	writer, err := col.NewBufferedWriter(path, col.WithBufferedEncoding(encodingType))
 	require.NoError(t, err)
 
 	// Debug the writer's properties
@@ -861,7 +860,7 @@ func createTestSegment(t *testing.T, path string, numEntries int, isLeft bool, e
 
 		// Write this batch
 		startWrite := time.Now()
-		err := writer.Write(ids, values)
+		err := writer.BatchAdd(ids, values)
 		require.NoError(t, err)
 
 		totalEntries += currentBatchSize
@@ -905,31 +904,24 @@ func createTestSegment(t *testing.T, path string, numEntries int, isLeft bool, e
 // customCompact is a copy of the Compact function with a configurable buffer size
 func customCompact(leftReader, rightReader *col.Reader, outputPath string, opts CompactionOptions, bufferSize int) error {
 	// Create the SimpleWriter with the specified encoding options
-	writerOptions := []col.WriterOption{}
+	writerOptions := []col.BufferedWriterOption{}
 
 	// If an encoding type is specified, use it
 	if opts.EncodingType != 0 {
-		writerOptions = append(writerOptions, col.WithEncoding(opts.EncodingType))
+		writerOptions = append(writerOptions, col.WithBufferedEncoding(opts.EncodingType))
 	}
 
 	// If a target block size is specified, use it
 	if opts.TargetBlockSize > 0 {
-		writerOptions = append(writerOptions, col.WithBlockSize(uint32(opts.TargetBlockSize)))
+		writerOptions = append(writerOptions, col.WithBufferedBlockSize(uint32(opts.TargetBlockSize)))
 	}
 
 	// Create the writer with the configured options
-	writer, err := col.NewSimpleWriter(outputPath, writerOptions...)
+	writer, err := col.NewBufferedWriter(outputPath, writerOptions...)
 	if err != nil {
 		return fmt.Errorf("failed to create output writer: %w", err)
 	}
 	defer writer.Close()
-
-	// If a target block size is specified, also set it on the SimpleWriter
-	if opts.TargetBlockSize > 0 {
-		if err := writer.SetTargetBlockSize(opts.TargetBlockSize); err != nil {
-			return fmt.Errorf("failed to set target block size: %w", err)
-		}
-	}
 
 	// Create iterators for both readers
 	leftIter := NewBlockIterator(leftReader)
@@ -982,7 +974,7 @@ func customCompact(leftReader, rightReader *col.Reader, outputPath string, opts 
 
 		// Flush to writer when buffer reaches capacity
 		if len(batchIDs) >= bufferSize {
-			if err := writer.Write(batchIDs, batchValues); err != nil {
+			if err := writer.BatchAdd(batchIDs, batchValues); err != nil {
 				return fmt.Errorf("failed to write batch: %w", err)
 			}
 			// Reset the batch buffers
@@ -993,7 +985,7 @@ func customCompact(leftReader, rightReader *col.Reader, outputPath string, opts 
 
 	// Write any remaining entries
 	if len(batchIDs) > 0 {
-		if err := writer.Write(batchIDs, batchValues); err != nil {
+		if err := writer.BatchAdd(batchIDs, batchValues); err != nil {
 			return fmt.Errorf("failed to write final batch: %w", err)
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -688,4 +689,262 @@ func analyzeFile(t *testing.T, filename string) {
 		t.Errorf("Too many blocks (%d) outside acceptable size range (%d-%d bytes). Maximum allowed: %d",
 			blocksOutsideTargetRange, acceptableMinSize, acceptableMaxSize, maxAllowedOutsideRange)
 	}
+}
+
+func TestBufferedWriter(t *testing.T) {
+	// Create a temporary directory for the test
+	tempDir, err := os.MkdirTemp("", "col-buffered-writer-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	// Create a test file
+	filePath := filepath.Join(tempDir, "buffered_test.col")
+
+	// Create a BufferedWriter
+	writer, err := NewBufferedWriter(filePath, WithBufferedEncoding(EncodingRaw))
+	require.NoError(t, err)
+
+	// Write a large dataset to ensure multiple blocks are created
+	// We'll create 20,000 ID-value pairs, which should be around 320KB
+	// This should result in at least 2-3 blocks with our 128KB target
+	const numPairs = 20000
+	ids := make([]uint64, numPairs)
+	values := make([]int64, numPairs)
+
+	// Fill with data (intentionally not sorted)
+	for i := 0; i < numPairs; i++ {
+		// Use a pattern that's not sorted to test sorting
+		ids[i] = uint64((i * 7) % numPairs)
+		values[i] = int64(i * 100)
+	}
+
+	// Sort the data by ID (BufferedWriter requires sorted input)
+	sortByID(ids, values)
+
+	// Write the data
+	err = writer.BatchAdd(ids, values)
+	require.NoError(t, err)
+
+	// Close the writer (this should finalize the file)
+	err = writer.Close()
+	require.NoError(t, err)
+
+	// Open the file for reading to verify the blocks
+	reader, err := NewReader(filePath)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	// Verify block count - should be at least 2 with our data size
+	blockCount := reader.BlockCount()
+	assert.GreaterOrEqual(t, blockCount, uint64(2), "Expected at least 2 blocks")
+	t.Logf("Created %d blocks", blockCount)
+
+	// Verify each block's size
+	var totalItems uint32
+	for i := uint64(0); i < blockCount; i++ {
+		// Get the block stats
+		blockStats := reader.blockIndex[i]
+
+		// Add to total count
+		totalItems += blockStats.Count
+
+		// Log block info
+		t.Logf("Block %d: count=%d, size=%d", i, blockStats.Count, blockStats.BlockSize)
+
+		// Verify block alignment (except first block)
+		if i > 0 {
+			blockOffset := reader.blockIndex[i].BlockOffset
+			assert.Equal(t, uint64(0), blockOffset%uint64(PageSize),
+				"Block %d offset %d is not page-aligned", i, blockOffset)
+		}
+	}
+
+	// Verify we have all our items
+	assert.Equal(t, uint32(numPairs), totalItems, "Total items should match input count")
+
+	// Read all the data back and verify it's sorted
+	var allIDs []uint64
+	var allValues []int64
+
+	for i := uint64(0); i < blockCount; i++ {
+		ids, values, err := reader.GetPairs(i)
+		require.NoError(t, err)
+
+		allIDs = append(allIDs, ids...)
+		allValues = append(allValues, values...)
+	}
+
+	// Verify we got all the data back
+	assert.Equal(t, numPairs, len(allIDs), "Should have read all IDs")
+	assert.Equal(t, numPairs, len(allValues), "Should have read all values")
+
+	// Verify the data is sorted by ID
+	assert.True(t, isSorted(allIDs), "IDs should be sorted")
+}
+
+// Test using Add method instead of BatchAdd
+func TestBufferedWriterAdd(t *testing.T) {
+	// Create a temporary directory for the test
+	tempDir, err := os.MkdirTemp("", "col-buffered-writer-add-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	// Create a test file
+	filePath := filepath.Join(tempDir, "buffered_add_test.col")
+
+	// Create a BufferedWriter with a smaller target block size for testing
+	writer, err := NewBufferedWriter(filePath,
+		WithBufferedEncoding(EncodingRaw),
+		WithBufferedBlockSize(16*1024)) // 16KB blocks
+	require.NoError(t, err)
+
+	// Write multiple items using Add
+	const numItems = 10000
+	expectedIDs := make([]uint64, 0, numItems)
+	expectedValues := make([]int64, 0, numItems)
+
+	for i := 0; i < numItems; i++ {
+		id := uint64(i)
+		value := int64(i * 10)
+
+		err = writer.Add(id, value)
+		require.NoError(t, err)
+
+		expectedIDs = append(expectedIDs, id)
+		expectedValues = append(expectedValues, value)
+	}
+
+	// Close the writer
+	err = writer.Close()
+	require.NoError(t, err)
+
+	// Open the file for reading
+	reader, err := NewReader(filePath)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	// Verify total count
+	var totalItems uint32
+	blockCount := reader.BlockCount()
+	for i := uint64(0); i < blockCount; i++ {
+		totalItems += reader.blockIndex[i].Count
+	}
+
+	assert.Equal(t, uint32(numItems), totalItems, "Total items should match input count")
+
+	// Read all data
+	var allIDs []uint64
+	var allValues []int64
+	for i := uint64(0); i < blockCount; i++ {
+		ids, values, err := reader.GetPairs(i)
+		require.NoError(t, err)
+		allIDs = append(allIDs, ids...)
+		allValues = append(allValues, values...)
+	}
+
+	// Verify we got all the data back
+	assert.Equal(t, numItems, len(allIDs), "Should have read all IDs")
+	assert.Equal(t, numItems, len(allValues), "Should have read all values")
+
+	// Verify the data is correct (should be sorted by ID)
+	for i := 0; i < numItems; i++ {
+		assert.Equal(t, uint64(i), allIDs[i], "ID at index %d should match", i)
+		assert.Equal(t, int64(i*10), allValues[i], "Value at index %d should match", i)
+	}
+}
+
+// Test with varint encoding to verify block size estimation
+func TestBufferedWriterVarIntEncoding(t *testing.T) {
+	// Create a temporary directory for the test
+	tempDir, err := os.MkdirTemp("", "col-buffered-writer-varint-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	// Create a test file
+	filePath := filepath.Join(tempDir, "varint_test.col")
+
+	// Create a BufferedWriter with varint encoding
+	writer, err := NewBufferedWriter(filePath,
+		WithBufferedEncoding(EncodingVarIntBoth),
+		WithBufferedBlockSize(32*1024)) // 32KB
+	require.NoError(t, err)
+
+	// Test with sequential IDs with small values
+	// This batch is large enough to create multiple blocks
+	const numPairs = 50000
+	ids := make([]uint64, numPairs)
+	values := make([]int64, numPairs)
+
+	// Sequential IDs with small values (1-100)
+	for i := 0; i < numPairs; i++ {
+		ids[i] = uint64(i)         // Sequential IDs
+		values[i] = int64(i % 100) // Small values
+	}
+
+	// Write the data - this should create multiple blocks
+	err = writer.BatchAdd(ids, values)
+	require.NoError(t, err)
+
+	// Test with sparse IDs with mixed values
+	sparseIDs := make([]uint64, numPairs)
+	sparseValues := make([]int64, numPairs)
+
+	// Use a fixed seed for reproducibility
+	r := rand.New(rand.NewSource(42))
+
+	// Sparse IDs with mixed values
+	for i := 0; i < numPairs; i++ {
+		sparseIDs[i] = uint64(100000 + i*10) // Sparse IDs (100000, 100010, 100020, ...)
+
+		// Mix of small, medium, and large values, some negative
+		switch i % 4 {
+		case 0:
+			sparseValues[i] = int64(r.Intn(100)) // Small positive
+		case 1:
+			sparseValues[i] = int64(r.Intn(10000)) // Medium positive
+		case 2:
+			sparseValues[i] = int64(r.Intn(1000000)) // Large positive
+		case 3:
+			sparseValues[i] = -int64(r.Intn(100000)) // Negative
+		}
+	}
+
+	// Write the data - this should create multiple blocks
+	err = writer.BatchAdd(sparseIDs, sparseValues)
+	require.NoError(t, err)
+
+	// Close the writer
+	err = writer.Close()
+	require.NoError(t, err)
+
+	// Open the file for reading
+	reader, err := NewReader(filePath)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	// Verify encoding type
+	assert.Equal(t, EncodingVarIntBoth, reader.EncodingType(), "Encoding type should be VarIntBoth")
+
+	// Verify block count
+	blockCount := reader.BlockCount()
+	assert.GreaterOrEqual(t, blockCount, uint64(6), "Expected at least 6 blocks")
+	t.Logf("Created %d blocks with varint encoding", blockCount)
+
+	// Verify each block's size and count
+	var totalItems uint32
+	var totalSize uint64
+	for i := uint64(0); i < blockCount; i++ {
+		// Get the block stats
+		blockStats := reader.blockIndex[i]
+
+		// Add to totals
+		totalItems += blockStats.Count
+		totalSize += uint64(blockStats.BlockSize)
+
+		// Log block info
+		t.Logf("Block %d: count=%d, size=%d", i, blockStats.Count, blockStats.BlockSize)
+	}
+
+	// Verify total items
+	assert.Equal(t, uint32(numPairs*2), totalItems, "Expected correct total items")
 }
