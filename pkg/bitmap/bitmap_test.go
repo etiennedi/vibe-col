@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestBitmap(t *testing.T) {
@@ -107,13 +106,11 @@ func TestSerialization(t *testing.T) {
 	b.Add(10000)
 
 	// Serialize
-	buffer, err := b.ToBuffer()
-	require.NoError(t, err)
+	buffer := b.ToBuffer()
 	assert.NotEmpty(t, buffer)
 
 	// Deserialize
-	b2, err := FromBuffer(buffer)
-	require.NoError(t, err)
+	b2 := FromBuffer(buffer)
 
 	// Verify content
 	assert.Equal(t, b.Count(), b2.Count())
@@ -152,8 +149,8 @@ func TestLargeIDs(t *testing.T) {
 	b.Add(smallID)
 	b.Add(largeID)
 
-	// We should only see the small ID since we're using roaring which supports 32-bit only
+	// Sroar supports full uint64 range
 	assert.True(t, b.Contains(smallID))
-	assert.False(t, b.Contains(largeID))  // Large ID should not be stored
-	assert.Equal(t, uint64(1), b.Count()) // Only one valid ID
+	assert.True(t, b.Contains(largeID))
+	assert.Equal(t, uint64(2), b.Count())
 }

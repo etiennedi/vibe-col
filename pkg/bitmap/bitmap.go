@@ -1,23 +1,23 @@
-// Package bitmap provides a wrapper around the roaring bitmap library
+// Package bitmap provides a wrapper around the sroar bitmap library
 package bitmap
 
 import (
-	"github.com/RoaringBitmap/roaring"
+	"github.com/weaviate/sroar"
 )
 
-// Bitmap is a wrapper around roaring bitmap
+// Bitmap is a wrapper around sroar.Bitmap
 type Bitmap struct {
-	bitmap *roaring.Bitmap
+	bitmap *sroar.Bitmap
 }
 
 // New creates a new empty bitmap
 func New() *Bitmap {
 	return &Bitmap{
-		bitmap: roaring.New(),
+		bitmap: sroar.NewBitmap(),
 	}
 }
 
-// FromIDs creates a bitmap from a list of IDs
+// FromIDs creates a new bitmap from a list of IDs
 func FromIDs(ids []uint64) *Bitmap {
 	b := New()
 	for _, id := range ids {
@@ -28,17 +28,12 @@ func FromIDs(ids []uint64) *Bitmap {
 
 // Add adds an ID to the bitmap
 func (b *Bitmap) Add(id uint64) {
-	if id <= roaring.MaxUint32 {
-		b.bitmap.Add(uint32(id))
-	}
+	b.bitmap.Set(id)
 }
 
 // Contains checks if the bitmap contains the ID
 func (b *Bitmap) Contains(id uint64) bool {
-	if id <= roaring.MaxUint32 {
-		return b.bitmap.Contains(uint32(id))
-	}
-	return false
+	return b.bitmap.Contains(id)
 }
 
 // Count returns the number of IDs in the bitmap
@@ -48,12 +43,7 @@ func (b *Bitmap) Count() uint64 {
 
 // ToArray returns all IDs in the bitmap as a slice
 func (b *Bitmap) ToArray() []uint64 {
-	uint32Array := b.bitmap.ToArray()
-	result := make([]uint64, len(uint32Array))
-	for i, v := range uint32Array {
-		result[i] = uint64(v)
-	}
-	return result
+	return b.bitmap.ToArray()
 }
 
 // Clone returns a copy of the bitmap
@@ -63,22 +53,19 @@ func (b *Bitmap) Clone() *Bitmap {
 	}
 }
 
-// And performs a bitwise AND operation with another bitmap
-// modifies the bitmap in place
+// And performs the bitwise AND operation with another bitmap
 func (b *Bitmap) And(other *Bitmap) {
-	b.bitmap.And(other.bitmap)
+	b.bitmap = sroar.And(b.bitmap, other.bitmap)
 }
 
-// Or performs a bitwise OR operation with another bitmap
-// modifies the bitmap in place
+// Or performs the bitwise OR operation with another bitmap
 func (b *Bitmap) Or(other *Bitmap) {
-	b.bitmap.Or(other.bitmap)
+	b.bitmap = sroar.Or(b.bitmap, other.bitmap)
 }
 
-// AndNot performs a bitwise AND NOT operation with another bitmap
-// modifies the bitmap in place
+// AndNot performs the bitwise AND NOT operation with another bitmap
 func (b *Bitmap) AndNot(other *Bitmap) {
-	b.bitmap.AndNot(other.bitmap)
+	b.bitmap = sroar.AndNot(b.bitmap, other.bitmap)
 }
 
 // IsEmpty checks if the bitmap is empty
@@ -88,34 +75,31 @@ func (b *Bitmap) IsEmpty() bool {
 
 // Clear removes all IDs from the bitmap
 func (b *Bitmap) Clear() {
-	b.bitmap.Clear()
+	b.bitmap = sroar.NewBitmap()
 }
 
 // ToBuffer returns the bitmap as a serialized byte slice
-func (b *Bitmap) ToBuffer() ([]byte, error) {
-	return b.bitmap.ToBytes()
+func (b *Bitmap) ToBuffer() []byte {
+	return b.bitmap.ToBuffer()
 }
 
 // FromBuffer creates a bitmap from a serialized byte slice
-func FromBuffer(buffer []byte) (*Bitmap, error) {
-	rb := roaring.New()
-	_, err := rb.FromBuffer(buffer)
-	if err != nil {
-		return nil, err
+func FromBuffer(buf []byte) *Bitmap {
+	return &Bitmap{
+		bitmap: sroar.FromBuffer(buf),
 	}
-	return &Bitmap{bitmap: rb}, nil
 }
 
-// GetSroarBitmap returns the underlying roaring bitmap
-// This is for internal compatibility only
-func (b *Bitmap) GetSroarBitmap() *roaring.Bitmap {
+// GetSroarBitmap returns the underlying sroar bitmap
+// This is needed for internal compatibility with the col package
+func (b *Bitmap) GetSroarBitmap() *sroar.Bitmap {
 	return b.bitmap
 }
 
-// FromSroarBitmap creates a bitmap from a roaring bitmap
-// This is for internal compatibility only
-func FromSroarBitmap(rb *roaring.Bitmap) *Bitmap {
+// FromSroarBitmap creates a bitmap from a sroar bitmap
+// This is needed for internal compatibility with the col package
+func FromSroarBitmap(bitmap *sroar.Bitmap) *Bitmap {
 	return &Bitmap{
-		bitmap: rb,
+		bitmap: bitmap,
 	}
 }
