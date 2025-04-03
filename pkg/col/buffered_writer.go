@@ -101,8 +101,8 @@ func (bw *BufferedWriter) Add(id uint64, value int64) error {
 			MaxValue:               value,
 			Sum:                    value,
 			Count:                  1,
-			SerializedIDSection:    make([]byte, 0, 4096),
-			SerializedValueSection: make([]byte, 0, 4096),
+			SerializedIDSection:    make([]byte, 0, bw.blockSizeTarget/2), // Use half the block size target for IDs
+			SerializedValueSection: make([]byte, 0, bw.blockSizeTarget/2), // Use half the block size target for values
 		}
 
 		// First ID  and value are	is not delta encoded, so we only need to pay
@@ -251,8 +251,8 @@ func (bw *BufferedWriter) BatchAdd(ids []uint64, values []int64) error {
 				MaxValue:               value,
 				Sum:                    value,
 				Count:                  1,
-				SerializedIDSection:    make([]byte, 0, 4096),
-				SerializedValueSection: make([]byte, 0, 4096),
+				SerializedIDSection:    make([]byte, 0, bw.blockSizeTarget/2), // Use half the block size target for IDs
+				SerializedValueSection: make([]byte, 0, bw.blockSizeTarget/2), // Use half the block size target for values
 			}
 
 			// First ID and value are not delta encoded, so we only need to pay
