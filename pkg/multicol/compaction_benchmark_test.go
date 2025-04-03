@@ -91,7 +91,7 @@ func BenchmarkCompaction(b *testing.B) {
 	}
 }
 
-// BenchmarkCompactionComparison benchmarks and compares both compaction implementations
+// BenchmarkCompactionComparison benchmarks the current compaction implementation with different dataset sizes
 func BenchmarkCompactionComparison(b *testing.B) {
 	benchSizes := []struct {
 		name      string
@@ -103,7 +103,7 @@ func BenchmarkCompactionComparison(b *testing.B) {
 	}
 
 	for _, size := range benchSizes {
-		// Create test files once for both implementations
+		// Create test files for benchmarking
 		leftFilePath, err := prepareSegmentFile("comp_left", size.leftSize, true, col.EncodingVarIntBoth)
 		if err != nil {
 			b.Fatalf("Failed to create left segment: %v", err)
@@ -116,69 +116,52 @@ func BenchmarkCompactionComparison(b *testing.B) {
 		}
 		defer os.Remove(rightFilePath)
 
-		// Create the comparison benchmarks
-		b.Run(fmt.Sprintf("%s/Old_With_Batches", size.name), func(b *testing.B) {
-			benchmarkImplementation(b, leftFilePath, rightFilePath, size.leftSize+size.rightSize, true)
-		})
-
-		b.Run(fmt.Sprintf("%s/New_No_Batches", size.name), func(b *testing.B) {
-			benchmarkImplementation(b, leftFilePath, rightFilePath, size.leftSize+size.rightSize, false)
+		// Benchmark the compaction implementation
+		b.Run(size.name, func(b *testing.B) {
+			benchmarkCompaction(b, leftFilePath, rightFilePath, size.leftSize+size.rightSize)
 		})
 	}
 }
 
-// Helper function to benchmark a specific implementation
-func benchmarkImplementation(b *testing.B, leftPath, rightPath string, totalEntries int, useBatches bool) {
-	b.ResetTimer()
+// Helper function to benchmark the compaction implementation
+func benchmarkCompaction(b *testing.B, leftPath, rightPath string, totalEntries int) {
 	for i := 0; i < b.N; i++ {
-		// Create a temporary output file
-		outputFile, err := os.CreateTemp("", "bench_comp_impl_*.col")
+		// Create a temporary file for the output
+		outputPath, err := os.CreateTemp("", "benchmark_output_*.col")
 		if err != nil {
 			b.Fatalf("Failed to create output file: %v", err)
 		}
-		outputPath := outputFile.Name()
-		outputFile.Close()
+		outputFilePath := outputPath.Name()
+		outputPath.Close()
+		defer os.Remove(outputFilePath)
 
-		// Open input files
+		// Open input segments
 		leftReader, err := col.NewReader(leftPath)
 		if err != nil {
-			os.Remove(outputPath)
-			b.Fatalf("Failed to open left reader: %v", err)
+			b.Fatalf("Failed to open left segment: %v", err)
 		}
+		defer leftReader.Close()
 
 		rightReader, err := col.NewReader(rightPath)
 		if err != nil {
-			leftReader.Close()
-			os.Remove(outputPath)
-			b.Fatalf("Failed to open right reader: %v", err)
+			b.Fatalf("Failed to open right segment: %v", err)
 		}
+		defer rightReader.Close()
 
-		// Configure compaction options
+		// Set up compaction options
 		opts := DefaultCompactionOptions()
 		opts.EncodingType = col.EncodingVarIntBoth
 
-		// Run the appropriate implementation
+		// Run the compaction
 		startTime := time.Now()
-		if useBatches {
-			err = CompactWithBatches(leftReader, rightReader, outputPath, opts)
-		} else {
-			err = Compact(leftReader, rightReader, outputPath, opts)
-		}
-
-		if err != nil {
-			leftReader.Close()
-			rightReader.Close()
-			os.Remove(outputPath)
+		if err := Compact(leftReader, rightReader, outputFilePath, opts); err != nil {
 			b.Fatalf("Compaction failed: %v", err)
 		}
+		duration := time.Since(startTime)
 
-		compactionTime := time.Since(startTime)
-		b.ReportMetric(float64(totalEntries)/compactionTime.Seconds(), "entries/sec")
-
-		// Clean up
-		leftReader.Close()
-		rightReader.Close()
-		os.Remove(outputPath)
+		// Calculate throughput
+		entriesPerSecond := float64(totalEntries) / duration.Seconds()
+		b.ReportMetric(entriesPerSecond, "entries/sec")
 	}
 }
 

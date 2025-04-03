@@ -709,12 +709,8 @@ func TestBlockSizes(t *testing.T) {
 			opts.TargetBlockSize = targetBlockSize
 			t.Logf("Target block size set to %d bytes", targetBlockSize)
 
-			// Debug the buffer size used in compaction
-			const bufferSize = 10000
-			t.Logf("Using buffer size of %d entries for compaction", bufferSize)
-
-			// Create a custom compaction function with a smaller buffer size
-			err = customCompact(leftReader, rightReader, outputFilePath, opts, bufferSize)
+			// Run compaction to analyze block sizes
+			err = Compact(leftReader, rightReader, outputFilePath, opts)
 			require.NoError(t, err)
 
 			// Open the output file and analyze block sizes
@@ -899,98 +895,6 @@ func createTestSegment(t *testing.T, path string, numEntries int, isLeft bool, e
 			t.Logf("Average block size in segment: %.2f bytes", avgSize)
 		}
 	}
-}
-
-// customCompact is a copy of the Compact function with a configurable buffer size
-func customCompact(leftReader, rightReader *col.Reader, outputPath string, opts CompactionOptions, bufferSize int) error {
-	// Create the SimpleWriter with the specified encoding options
-	writerOptions := []col.BufferedWriterOption{}
-
-	// If an encoding type is specified, use it
-	if opts.EncodingType != 0 {
-		writerOptions = append(writerOptions, col.WithBufferedEncoding(opts.EncodingType))
-	}
-
-	// If a target block size is specified, use it
-	if opts.TargetBlockSize > 0 {
-		writerOptions = append(writerOptions, col.WithBufferedBlockSize(uint32(opts.TargetBlockSize)))
-	}
-
-	// Create the writer with the configured options
-	writer, err := col.NewBufferedWriter(outputPath, writerOptions...)
-	if err != nil {
-		return fmt.Errorf("failed to create output writer: %w", err)
-	}
-	defer writer.Close()
-
-	// Create iterators for both readers
-	leftIter := NewBlockIterator(leftReader)
-	rightIter := NewBlockIterator(rightReader)
-
-	// Prime the iterators
-	leftHasData := leftIter.Next()
-	rightHasData := rightIter.Next()
-
-	// Use the specified buffer size
-	batchIDs := make([]uint64, 0, bufferSize)
-	batchValues := make([]int64, 0, bufferSize)
-
-	// Process all entries from both readers using merge-sort algorithm
-	for leftHasData || rightHasData {
-		// Determine which entry (or entries) to add to the result next
-		if !leftHasData {
-			// Only right reader has more data
-			batchIDs = append(batchIDs, rightIter.CurrentID())
-			batchValues = append(batchValues, rightIter.CurrentValue())
-			rightHasData = rightIter.Next()
-		} else if !rightHasData {
-			// Only left reader has more data
-			batchIDs = append(batchIDs, leftIter.CurrentID())
-			batchValues = append(batchValues, leftIter.CurrentValue())
-			leftHasData = leftIter.Next()
-		} else {
-			// Both readers have more data, need to compare IDs
-			leftID := leftIter.CurrentID()
-			rightID := rightIter.CurrentID()
-
-			if rightID < leftID {
-				// Take right entry (lower ID)
-				batchIDs = append(batchIDs, rightID)
-				batchValues = append(batchValues, rightIter.CurrentValue())
-				rightHasData = rightIter.Next()
-			} else if leftID < rightID {
-				// Take left entry (lower ID)
-				batchIDs = append(batchIDs, leftID)
-				batchValues = append(batchValues, leftIter.CurrentValue())
-				leftHasData = leftIter.Next()
-			} else {
-				// Same ID - take right value, advance both iterators
-				batchIDs = append(batchIDs, rightID)
-				batchValues = append(batchValues, rightIter.CurrentValue())
-				leftHasData = leftIter.Next()
-				rightHasData = rightIter.Next()
-			}
-		}
-
-		// Flush to writer when buffer reaches capacity
-		if len(batchIDs) >= bufferSize {
-			if err := writer.BatchAdd(batchIDs, batchValues); err != nil {
-				return fmt.Errorf("failed to write batch: %w", err)
-			}
-			// Reset the batch buffers
-			batchIDs = batchIDs[:0]
-			batchValues = batchValues[:0]
-		}
-	}
-
-	// Write any remaining entries
-	if len(batchIDs) > 0 {
-		if err := writer.BatchAdd(batchIDs, batchValues); err != nil {
-			return fmt.Errorf("failed to write final batch: %w", err)
-		}
-	}
-
-	return nil
 }
 
 // Helper function to extract block sizes from debug info
