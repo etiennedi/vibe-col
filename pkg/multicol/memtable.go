@@ -5,7 +5,8 @@ import (
 	"math/rand"
 	"sync"
 	"sync/atomic"
-	"vibe-lsm/pkg/bitmap"
+
+	"github.com/weaviate/sroar"
 )
 
 const (
@@ -49,7 +50,7 @@ type Memtable interface {
 
 	// FilteredAggregate performs aggregation on IDs present in the filter
 	// Returns: min ID, max ID, min value, max value, sum of values, count
-	FilteredAggregate(filter *bitmap.Bitmap) (uint64, uint64, int64, int64, int64, int)
+	FilteredAggregate(filter *sroar.Bitmap) (uint64, uint64, int64, int64, int64, int)
 
 	// Flush writes the non-deleted contents to the specified path
 	Flush(path string) error

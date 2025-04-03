@@ -3,8 +3,9 @@ package multicol
 import (
 	"fmt"
 	"sort"
-	"vibe-lsm/pkg/bitmap"
 	"vibe-lsm/pkg/col"
+
+	"github.com/weaviate/sroar"
 )
 
 // Add adds a single ID-value pair to the memtable
@@ -278,7 +279,7 @@ func (m *MemtableImpl) Aggregate() (uint64, uint64, int64, int64, int64, int) {
 }
 
 // FilteredAggregate performs aggregation on IDs present in the filter
-func (m *MemtableImpl) FilteredAggregate(filter *bitmap.Bitmap) (uint64, uint64, int64, int64, int64, int) {
+func (m *MemtableImpl) FilteredAggregate(filter *sroar.Bitmap) (uint64, uint64, int64, int64, int64, int) {
 	var sum int64
 	var count int
 	var minID, maxID uint64

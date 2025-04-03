@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"vibe-lsm/pkg/bitmap"
 	"vibe-lsm/pkg/col"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/weaviate/sroar"
 )
 
 func TestMemtableBasicOperations(t *testing.T) {
@@ -178,9 +178,9 @@ func TestMemtableFilteredAggregate(t *testing.T) {
 	m.Delete(7)
 
 	// Create a filter for even IDs
-	filter := bitmap.New()
+	filter := sroar.NewBitmap()
 	for i := uint64(2); i <= 10; i += 2 {
-		filter.Add(i)
+		filter.Set(i)
 	}
 
 	// Filtered aggregate (even IDs, excluding deleted entries)
