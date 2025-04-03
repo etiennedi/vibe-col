@@ -243,8 +243,8 @@ func TestWriterBlockSizes(t *testing.T) {
 	require.NoError(t, err)
 	defer bufferedWriter.Close()
 
-	batchSize := 10000 // Write in larger batches for efficiency
-	numBatches := 10   // Reduced from 4000 to make the test run faster
+	batchSize := 50    // Write in larger batches for efficiency
+	numBatches := 2000 // Reduced from 4000 to make the test run faster
 
 	for i := 0; i < numBatches; i++ {
 		ids := make([]uint64, batchSize)
@@ -284,10 +284,7 @@ func TestWriterBlockSizes(t *testing.T) {
 	avgBlockSize := float64(fileSize) / float64(blockCount)
 	t.Logf("Average block size: %.2f bytes (%.2f%% of target)", avgBlockSize, avgBlockSize*100/float64(128*1024))
 
-	// NOTE: BufferedWriter is optimized for different usage patterns than SimpleWriter
-	// and doesn't achieve the same block size efficiency in this specific test case.
-	// This is expected as BufferedWriter has different batching behavior.
-	minEfficiency := 15.0 // Lowered threshold for BufferedWriter
+	minEfficiency := 80.0
 	require.GreaterOrEqual(t, avgBlockSize*100/float64(128*1024), minEfficiency,
 		"Average block size efficiency should be at least %.2f%% of target", minEfficiency)
 
