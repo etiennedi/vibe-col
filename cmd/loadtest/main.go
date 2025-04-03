@@ -81,7 +81,14 @@ func runImport(numValues, blockSize int, filename string, seed int64, maxValue i
 		fmt.Printf("CPU profiling enabled, writing to %s\n", cpuProfile)
 	}
 
-	fmt.Printf("Importing %d values with block size %d to %s\n", numValues, blockSize, filename)
+	// Use 128KB as optimal block size if not explicitly specified
+	optimalBlockSize := blockSize
+	if blockSize == defaultBlockSize {
+		optimalBlockSize = 128 * 1024
+	}
+
+	fmt.Printf("Importing %d values with optimal block size %d KB to %s\n",
+		numValues, optimalBlockSize/1024, filename)
 
 	// Create directory if it doesn't exist
 	dir := filepath.Dir(filename)
@@ -95,10 +102,10 @@ func runImport(numValues, blockSize int, filename string, seed int64, maxValue i
 	// Initialize random number generator
 	rng := rand.New(rand.NewSource(seed))
 
-	// Create SimpleWriter with VarInt encoding for both IDs and values
-	writer, err := col.NewSimpleWriter(filename,
-		col.WithBlockSize(uint32(blockSize)),
-		col.WithEncoding(col.EncodingVarIntBoth))
+	// Create BufferedWriter with VarInt encoding for both IDs and values
+	writer, err := col.NewBufferedWriter(filename,
+		col.WithBufferedBlockSize(uint32(optimalBlockSize)),
+		col.WithBufferedEncoding(col.EncodingVarIntBoth))
 	if err != nil {
 		fmt.Printf("Error creating writer: %v\n", err)
 		os.Exit(1)
@@ -109,10 +116,12 @@ func runImport(numValues, blockSize int, filename string, seed int64, maxValue i
 	startTime := time.Now()
 	lastReportTime := startTime
 	valuesWritten := 0
-	blockCount := 0
+
+	// For tracking items written
+	totalItemsWritten := uint64(0)
 
 	// Generate and write values in batches
-	batchSize := 10000 // Use a reasonable batch size for SimpleWriter
+	batchSize := 10000 // Use a reasonable batch size for BufferedWriter
 
 	for valuesWritten < numValues {
 		// Determine batch size for this iteration
@@ -145,20 +154,15 @@ func runImport(numValues, blockSize int, filename string, seed int64, maxValue i
 			}
 		}
 
-		// Write the batch to the SimpleWriter
-		if err := writer.Write(ids, values); err != nil {
+		// Write the batch to the BufferedWriter
+		if err := writer.BatchAdd(ids, values); err != nil {
 			fmt.Printf("Error writing batch: %v\n", err)
 			os.Exit(1)
 		}
 
 		// Update counters
 		valuesWritten += currentBatchSize
-
-		// Get current total items to track progress
-		currentTotalItems := writer.TotalItems()
-		if currentTotalItems > uint64(blockCount) {
-			blockCount = int(currentTotalItems)
-		}
+		totalItemsWritten += uint64(currentBatchSize)
 
 		// Report progress every second
 		now := time.Now()
@@ -166,7 +170,7 @@ func runImport(numValues, blockSize int, filename string, seed int64, maxValue i
 			elapsed := now.Sub(startTime).Seconds()
 			fmt.Printf("Progress: %d/%d values (%.2f%%), %d items written, %.2f values/sec\n",
 				valuesWritten, numValues, float64(valuesWritten)/float64(numValues)*100,
-				currentTotalItems, float64(valuesWritten)/elapsed)
+				totalItemsWritten, float64(valuesWritten)/elapsed)
 			lastReportTime = now
 		}
 	}
@@ -181,7 +185,7 @@ func runImport(numValues, blockSize int, filename string, seed int64, maxValue i
 	elapsed := time.Since(startTime).Seconds()
 	fmt.Printf("\nImport completed in %.2f seconds\n", elapsed)
 	fmt.Printf("Total values: %d\n", valuesWritten)
-	fmt.Printf("Total items written: %d\n", writer.TotalItems())
+	fmt.Printf("Total items written: %d\n", totalItemsWritten)
 	fmt.Printf("Average throughput: %.2f values/sec\n", float64(valuesWritten)/elapsed)
 
 	// Get file size
