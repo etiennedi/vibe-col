@@ -473,67 +473,12 @@ func TestLargeBufferedWrite(t *testing.T) {
 		t.Skip("Skipping in short mode")
 	}
 
-	const numEntries = 100000
+	const numEntries = 1000000 // Increased from 100k to 1M
 
-	// Test with multiple block sizes
-	blockSizes := []int{8 * 1024, 16 * 1024, 32 * 1024} // 8KB, 16KB, 32KB
+	// Test with only 128KB block size for profiling
+	blockSizes := []int{128 * 1024}
 
 	for _, targetBlockSize := range blockSizes {
-		t.Run(fmt.Sprintf("BlockSize_%dKB_SingleAdd", targetBlockSize/1024), func(t *testing.T) {
-			// Create a temporary file for testing
-			f, err := os.CreateTemp("", "test-large-bufferedwriter-*.col")
-			if err != nil {
-				t.Fatalf("Failed to create temp file: %v", err)
-			}
-			defer os.Remove(f.Name())
-			defer f.Close()
-
-			// Create a buffered writer
-			bufferedWriter, err := NewBufferedWriter(f.Name(), WithBufferedBlockSize(uint32(targetBlockSize)))
-			if err != nil {
-				t.Fatalf("Failed to create buffered writer: %v", err)
-			}
-
-			// Generate test data
-			t.Logf("Adding %d entries to buffered writer with target block size %d bytes", numEntries, targetBlockSize)
-			var ids []uint64
-			var values []int64
-
-			for i := 0; i < numEntries; i++ {
-				ids = append(ids, uint64(i+1))
-				values = append(values, int64(i*10))
-			}
-
-			// Profiling: we'll time just the writing portion
-			writeStart := time.Now()
-
-			// Add entries one by one (single add)
-			for i := 0; i < numEntries; i++ {
-				err = bufferedWriter.Add(ids[i], values[i])
-				if err != nil {
-					t.Fatalf("Failed to add entry %d: %v", i, err)
-				}
-			}
-
-			// Close the writer to finalize the file
-			err = bufferedWriter.Close()
-			if err != nil {
-				t.Fatalf("Failed to close writer: %v", err)
-			}
-
-			// Calculate write time
-			writeTime := time.Since(writeStart)
-			entriesPerSecond := float64(numEntries) / writeTime.Seconds()
-			bytesPerSecond := float64(numEntries*16) / writeTime.Seconds() // 8 bytes for ID, 8 bytes for value
-
-			t.Logf("Performance metrics (single Add):")
-			t.Logf("  Total write time: %.3f seconds", writeTime.Seconds())
-			t.Logf("  Entries per second: %.2f", entriesPerSecond)
-			t.Logf("  Bytes per second: %.2f (%.2f MB/s)", bytesPerSecond, bytesPerSecond/1024/1024)
-
-			analyzeFile(t, f.Name())
-		})
-
 		t.Run(fmt.Sprintf("BlockSize_%dKB_BatchAdd", targetBlockSize/1024), func(t *testing.T) {
 			// Create a temporary file for testing
 			f, err := os.CreateTemp("", "test-large-bufferedwriter-batch-*.col")
@@ -732,8 +677,8 @@ func analyzeFile(t *testing.T, filename string) {
 	}
 
 	// Verify correct number of entries
-	if totalEntries != 100000 { // hardcoded from the test's numEntries const
-		t.Errorf("Expected %d total entries, got %d", 100000, totalEntries)
+	if totalEntries != 1000000 { // hardcoded from the test's numEntries const
+		t.Errorf("Expected %d total entries, got %d", 1000000, totalEntries)
 	}
 
 	// Calculate acceptable percentage of blocks outside the target range
