@@ -133,11 +133,10 @@ func (b *BlockBuffer) IsEmpty() bool {
 	return len(b.ids) == 0
 }
 
-// Compact compacts two column file segments using a merge-sort approach
-// The leftReader contains older data, and the rightReader contains newer data.
-// When the same ID appears in both segments, the value from the rightReader takes precedence.
+// Compact merges two column file segments using a merge-sort approach.
+// It uses a BufferedWriter to write the data, with options for target block size and encoding type.
 func Compact(leftReader, rightReader *col.Reader, outputPath string, opts CompactionOptions) error {
-	// Create the BufferedWriter with the specified encoding options
+	// Create the SimpleWriter with the specified encoding options
 	writerOptions := []col.BufferedWriterOption{}
 
 	// If an encoding type is specified, use it
@@ -165,24 +164,20 @@ func Compact(leftReader, rightReader *col.Reader, outputPath string, opts Compac
 	leftHasData := leftIter.Next()
 	rightHasData := rightIter.Next()
 
-	// Use a smaller buffer size to avoid issues with large batches
-	// This is a balance between memory usage and write efficiency
-	const bufferCap = 10000
-	batchIDs := make([]uint64, 0, bufferCap)
-	batchValues := make([]int64, 0, bufferCap)
-
 	// Process all entries from both readers using merge-sort algorithm
 	for leftHasData || rightHasData {
-		// Determine which entry (or entries) to add to the result next
+		// Determine which entry to add to the result next
 		if !leftHasData {
 			// Only right reader has more data
-			batchIDs = append(batchIDs, rightIter.CurrentID())
-			batchValues = append(batchValues, rightIter.CurrentValue())
+			if err := writer.Add(rightIter.CurrentID(), rightIter.CurrentValue()); err != nil {
+				return fmt.Errorf("failed to write right entry: %w", err)
+			}
 			rightHasData = rightIter.Next()
 		} else if !rightHasData {
 			// Only left reader has more data
-			batchIDs = append(batchIDs, leftIter.CurrentID())
-			batchValues = append(batchValues, leftIter.CurrentValue())
+			if err := writer.Add(leftIter.CurrentID(), leftIter.CurrentValue()); err != nil {
+				return fmt.Errorf("failed to write left entry: %w", err)
+			}
 			leftHasData = leftIter.Next()
 		} else {
 			// Both readers have more data, need to compare IDs
@@ -191,38 +186,24 @@ func Compact(leftReader, rightReader *col.Reader, outputPath string, opts Compac
 
 			if rightID < leftID {
 				// Take right entry (lower ID)
-				batchIDs = append(batchIDs, rightID)
-				batchValues = append(batchValues, rightIter.CurrentValue())
+				if err := writer.Add(rightID, rightIter.CurrentValue()); err != nil {
+					return fmt.Errorf("failed to write right entry: %w", err)
+				}
 				rightHasData = rightIter.Next()
 			} else if leftID < rightID {
 				// Take left entry (lower ID)
-				batchIDs = append(batchIDs, leftID)
-				batchValues = append(batchValues, leftIter.CurrentValue())
+				if err := writer.Add(leftID, leftIter.CurrentValue()); err != nil {
+					return fmt.Errorf("failed to write left entry: %w", err)
+				}
 				leftHasData = leftIter.Next()
 			} else {
 				// Same ID - take right value, advance both iterators
-				batchIDs = append(batchIDs, rightID)
-				batchValues = append(batchValues, rightIter.CurrentValue())
+				if err := writer.Add(rightID, rightIter.CurrentValue()); err != nil {
+					return fmt.Errorf("failed to write right entry: %w", err)
+				}
 				leftHasData = leftIter.Next()
 				rightHasData = rightIter.Next()
 			}
-		}
-
-		// Flush to writer when buffer reaches capacity
-		if len(batchIDs) >= bufferCap {
-			if err := writer.BatchAdd(batchIDs, batchValues); err != nil {
-				return fmt.Errorf("failed to write batch: %w", err)
-			}
-			// Reset the batch buffers
-			batchIDs = batchIDs[:0]
-			batchValues = batchValues[:0]
-		}
-	}
-
-	// Write any remaining entries
-	if len(batchIDs) > 0 {
-		if err := writer.BatchAdd(batchIDs, batchValues); err != nil {
-			return fmt.Errorf("failed to write final batch: %w", err)
 		}
 	}
 
