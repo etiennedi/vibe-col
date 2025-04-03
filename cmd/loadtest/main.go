@@ -81,13 +81,13 @@ func runImport(numValues, blockSize int, filename string, seed int64, maxValue i
 		fmt.Printf("CPU profiling enabled, writing to %s\n", cpuProfile)
 	}
 
-	// Use 128KB as optimal block size if not explicitly specified
+	// Use 512KB as optimal block size if not explicitly specified
 	optimalBlockSize := blockSize
 	if blockSize == defaultBlockSize {
-		optimalBlockSize = 128 * 1024
+		optimalBlockSize = 512 * 1024
 	}
 
-	fmt.Printf("Importing %d values with optimal block size %d KB to %s\n",
+	fmt.Printf("Importing %d values with BufferedWriter (block size %d KB) to %s\n",
 		numValues, optimalBlockSize/1024, filename)
 
 	// Create directory if it doesn't exist
