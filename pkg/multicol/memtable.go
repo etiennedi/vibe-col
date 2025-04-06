@@ -11,7 +11,10 @@ import (
 
 const (
 	// DefaultNumStripes is the default number of stripes for the memtable
-	DefaultNumStripes = 256
+	// Reduced from 256 to 8 based on performance analysis which showed that
+	// fewer stripes often perform better due to reduced lock management overhead.
+	// See STRIPING_ANALYSIS.md for details.
+	DefaultNumStripes = 8
 
 	// DefaultMaxHeight is the default maximum height of the skip list
 	DefaultMaxHeight = 24
