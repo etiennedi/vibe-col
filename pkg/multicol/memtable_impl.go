@@ -1,0 +1,313 @@
+package multicol
+
+import (
+	"bufio"
+	"encoding/binary"
+	"fmt"
+	"os"
+	"sync"
+	"sync/atomic"
+
+	"github.com/weaviate/sroar"
+)
+
+// MemtableImpl is the implementation of the Memtable interface
+// that uses a sync.Map internally for thread safety
+type MemtableImpl struct {
+	data     sync.Map
+	addCount atomic.Int64
+	delCount atomic.Int64
+}
+
+// MemtableOptions defines configuration options for the memtable
+type MemtableOptions struct {
+	// Reserved for future use
+}
+
+// DefaultMemtableOptions returns default options for the memtable
+func DefaultMemtableOptions() *MemtableOptions {
+	return &MemtableOptions{}
+}
+
+// NewMemtable creates a new memtable instance
+func NewMemtable(opts *MemtableOptions) Memtable {
+	// Options are reserved for future use
+	return &MemtableImpl{}
+}
+
+// Add adds a single ID-value pair
+func (m *MemtableImpl) Add(id uint64, value int64) error {
+	m.data.Store(id, value)
+	m.addCount.Add(1)
+	return nil
+}
+
+// BatchAdd adds multiple ID-value pairs
+func (m *MemtableImpl) BatchAdd(ids []uint64, values []int64) error {
+	if len(ids) != len(values) {
+		return fmt.Errorf("ids and values must have the same length")
+	}
+
+	for i := 0; i < len(ids); i++ {
+		m.data.Store(ids[i], values[i])
+	}
+
+	m.addCount.Add(int64(len(ids)))
+	return nil
+}
+
+// Delete marks an entry as deleted
+func (m *MemtableImpl) Delete(id uint64) bool {
+	if _, ok := m.data.Load(id); ok {
+		m.data.Delete(id)
+		m.delCount.Add(1)
+		return true
+	}
+	return false
+}
+
+// BatchDelete marks multiple entries as deleted
+func (m *MemtableImpl) BatchDelete(ids []uint64) int {
+	count := 0
+	for _, id := range ids {
+		if m.Delete(id) {
+			count++
+		}
+	}
+	return count
+}
+
+// Get returns the value for a specific ID
+func (m *MemtableImpl) Get(id uint64) (int64, bool) {
+	if value, ok := m.data.Load(id); ok {
+		return value.(int64), true
+	}
+	return 0, false
+}
+
+// Scan returns key-value pairs within a range
+func (m *MemtableImpl) Scan(startID, endID uint64) ([]uint64, []int64) {
+	var ids []uint64
+	var values []int64
+
+	m.data.Range(func(key, value interface{}) bool {
+		id := key.(uint64)
+		if id >= startID && id <= endID {
+			ids = append(ids, id)
+			values = append(values, value.(int64))
+		}
+		return true
+	})
+
+	return ids, values
+}
+
+// memtableIterator implements the Iterator interface for memtable entries
+type memtableIterator struct {
+	keys    []uint64
+	values  []int64
+	pos     int
+	hasNext bool
+}
+
+// Next advances the iterator to the next entry
+func (it *memtableIterator) Next() bool {
+	it.pos++
+	if it.pos < len(it.keys) {
+		it.hasNext = true
+		return true
+	}
+	it.hasNext = false
+	return false
+}
+
+// HasNext returns true if there are more entries
+func (it *memtableIterator) HasNext() bool {
+	return it.hasNext
+}
+
+// Entry returns the current entry
+func (it *memtableIterator) Entry() (uint64, int64) {
+	return it.keys[it.pos], it.values[it.pos]
+}
+
+// EntryWithDeleted returns the current entry and deleted status
+func (it *memtableIterator) EntryWithDeleted() (uint64, int64, bool) {
+	return it.keys[it.pos], it.values[it.pos], false
+}
+
+// Close does nothing for this implementation
+func (it *memtableIterator) Close() {
+	// Nothing to do
+}
+
+// ScanIterator returns an iterator for traversing entries
+func (m *MemtableImpl) ScanIterator(startID, endID uint64) Iterator {
+	ids, values := m.Scan(startID, endID)
+	return &memtableIterator{
+		keys:    ids,
+		values:  values,
+		pos:     -1, // Start before first element
+		hasNext: len(ids) > 0,
+	}
+}
+
+// Aggregate returns statistics about the entries
+func (m *MemtableImpl) Aggregate() (uint64, uint64, int64, int64, int64, int) {
+	var minID uint64 = ^uint64(0)
+	var maxID uint64 = 0
+	var minValue int64 = 1<<63 - 1
+	var maxValue int64 = -1 << 63
+	var sum int64 = 0
+	count := 0
+
+	m.data.Range(func(key, value interface{}) bool {
+		id := key.(uint64)
+		val := value.(int64)
+
+		if id < minID {
+			minID = id
+		}
+		if id > maxID {
+			maxID = id
+		}
+		if val < minValue {
+			minValue = val
+		}
+		if val > maxValue {
+			maxValue = val
+		}
+
+		sum += val
+		count++
+
+		return true
+	})
+
+	if count == 0 {
+		return 0, 0, 0, 0, 0, 0
+	}
+
+	return minID, maxID, minValue, maxValue, sum, count
+}
+
+// FilteredAggregate applies a filter to the aggregation
+func (m *MemtableImpl) FilteredAggregate(filter *sroar.Bitmap) (uint64, uint64, int64, int64, int64, int) {
+	var minID uint64 = ^uint64(0)
+	var maxID uint64 = 0
+	var minValue int64 = 1<<63 - 1
+	var maxValue int64 = -1 << 63
+	var sum int64 = 0
+	count := 0
+
+	m.data.Range(func(key, value interface{}) bool {
+		id := key.(uint64)
+
+		if !filter.Contains(id) {
+			return true
+		}
+
+		val := value.(int64)
+
+		if id < minID {
+			minID = id
+		}
+		if id > maxID {
+			maxID = id
+		}
+		if val < minValue {
+			minValue = val
+		}
+		if val > maxValue {
+			maxValue = val
+		}
+
+		sum += val
+		count++
+
+		return true
+	})
+
+	if count == 0 {
+		return 0, 0, 0, 0, 0, 0
+	}
+
+	return minID, maxID, minValue, maxValue, sum, count
+}
+
+// ActiveCount returns the number of active entries
+func (m *MemtableImpl) ActiveCount() int64 {
+	var count int64 = 0
+	m.data.Range(func(key, value interface{}) bool {
+		count++
+		return true
+	})
+	return count
+}
+
+// IsEmpty returns true if the memtable is empty
+func (m *MemtableImpl) IsEmpty() bool {
+	empty := true
+	m.data.Range(func(key, value interface{}) bool {
+		empty = false
+		return false // Stop ranging once we find one entry
+	})
+	return empty
+}
+
+// Flush writes the non-deleted contents to the specified path
+// Returns the number of entries written and any error
+func (m *MemtableImpl) Flush(path string) (uint64, error) {
+	// Create the file
+	file, err := os.Create(path)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	// Use a buffered writer for better performance
+	writer := bufio.NewWriter(file)
+	defer writer.Flush()
+
+	// Create a builder for accumulating entries
+	var entries []struct {
+		ID    uint64
+		Value int64
+	}
+
+	// Collect all non-deleted entries
+	m.data.Range(func(key, value interface{}) bool {
+		entries = append(entries, struct {
+			ID    uint64
+			Value int64
+		}{
+			ID:    key.(uint64),
+			Value: value.(int64),
+		})
+		return true
+	})
+
+	// Write the number of entries as a header
+	numEntries := uint64(len(entries))
+	err = binary.Write(writer, binary.LittleEndian, numEntries)
+	if err != nil {
+		return 0, err
+	}
+
+	// Write each entry
+	for _, entry := range entries {
+		// Write ID
+		err = binary.Write(writer, binary.LittleEndian, entry.ID)
+		if err != nil {
+			return 0, err
+		}
+
+		// Write value
+		err = binary.Write(writer, binary.LittleEndian, entry.Value)
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	return numEntries, nil
+}
