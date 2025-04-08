@@ -14,29 +14,129 @@ import (
 // MemtableImpl is the implementation of the Memtable interface
 // that uses a sync.Map internally for thread safety
 type MemtableImpl struct {
-	data     sync.Map
-	addCount atomic.Int64
-	delCount atomic.Int64
+	data       sync.Map
+	addCount   atomic.Int64
+	delCount   atomic.Int64
+	wal        WALManager
+	walEnabled bool
+}
+
+// DurableMemtable extends the Memtable interface to add WAL support
+type DurableMemtable interface {
+	Memtable
+
+	// EnableWAL enables WAL for durability at the specified path
+	EnableWAL(path string) error
+
+	// Sync ensures all operations are durably persisted
+	Sync() error
+
+	// DisableWAL disables the WAL
+	DisableWAL() error
 }
 
 // MemtableOptions defines configuration options for the memtable
 type MemtableOptions struct {
 	// Reserved for future use
+	WalPath       string // Path to the WAL file (empty disables WAL)
+	WalBufferSize int    // Buffer size for the WAL (0 means default)
 }
 
 // DefaultMemtableOptions returns default options for the memtable
 func DefaultMemtableOptions() *MemtableOptions {
-	return &MemtableOptions{}
+	return &MemtableOptions{
+		WalPath:       "", // WAL disabled by default
+		WalBufferSize: 0,  // Use default buffer size
+	}
 }
 
 // NewMemtable creates a new memtable instance
 func NewMemtable(opts *MemtableOptions) Memtable {
-	// Options are reserved for future use
-	return &MemtableImpl{}
+	mt := &MemtableImpl{}
+
+	// If options are provided and WAL path is set, enable WAL
+	if opts != nil && opts.WalPath != "" {
+		// Ignore errors in constructor - caller should check Memtable type
+		// and call EnableWAL explicitly if WAL is required
+		_ = mt.EnableWAL(opts.WalPath)
+	}
+
+	return mt
+}
+
+// NewDurableMemtable creates a new memtable with WAL support
+func NewDurableMemtable(opts *MemtableOptions) (DurableMemtable, error) {
+	mt := &MemtableImpl{}
+
+	// If options are provided and WAL path is set, enable WAL
+	if opts != nil && opts.WalPath != "" {
+		if err := mt.EnableWAL(opts.WalPath); err != nil {
+			return nil, err
+		}
+	}
+
+	return mt, nil
+}
+
+// EnableWAL enables the write-ahead log for durability
+func (m *MemtableImpl) EnableWAL(path string) error {
+	// Create a new WAL
+	wal, err := NewWAL(path, 0) // Use default buffer size
+	if err != nil {
+		return fmt.Errorf("failed to create WAL: %w", err)
+	}
+
+	// Recover from the WAL if it exists
+	if err := wal.Recover(m); err != nil {
+		return fmt.Errorf("failed to recover from WAL: %w", err)
+	}
+
+	// Set the WAL and mark as enabled
+	m.wal = wal
+	m.walEnabled = true
+
+	return nil
+}
+
+// Sync ensures all operations are durably persisted
+func (m *MemtableImpl) Sync() error {
+	if !m.walEnabled || m.wal == nil {
+		return fmt.Errorf("WAL not enabled")
+	}
+
+	return m.wal.Sync()
+}
+
+// DisableWAL disables the WAL
+func (m *MemtableImpl) DisableWAL() error {
+	if !m.walEnabled || m.wal == nil {
+		return nil // Nothing to do
+	}
+
+	// Close the WAL
+	var closeErr error
+	if err := m.wal.Close(); err != nil {
+		closeErr = fmt.Errorf("failed to close WAL: %w", err)
+	}
+
+	// Clear WAL and mark as disabled regardless of close error
+	// This makes the method idempotent and avoids resource leaks
+	m.wal = nil
+	m.walEnabled = false
+
+	return closeErr
 }
 
 // Add adds a single ID-value pair
 func (m *MemtableImpl) Add(id uint64, value int64) error {
+	// If WAL is enabled, log the operation first
+	if m.walEnabled && m.wal != nil {
+		if err := m.wal.LogAdd(id, value); err != nil {
+			return fmt.Errorf("failed to log add operation: %w", err)
+		}
+	}
+
+	// Add to in-memory map
 	m.data.Store(id, value)
 	m.addCount.Add(1)
 	return nil
@@ -46,6 +146,13 @@ func (m *MemtableImpl) Add(id uint64, value int64) error {
 func (m *MemtableImpl) BatchAdd(ids []uint64, values []int64) error {
 	if len(ids) != len(values) {
 		return fmt.Errorf("ids and values must have the same length")
+	}
+
+	// If WAL is enabled, log the batch operation first
+	if m.walEnabled && m.wal != nil {
+		if err := m.wal.LogBatchAdd(ids, values); err != nil {
+			return fmt.Errorf("failed to log batch add operation: %w", err)
+		}
 	}
 
 	for i := 0; i < len(ids); i++ {
@@ -58,23 +165,55 @@ func (m *MemtableImpl) BatchAdd(ids []uint64, values []int64) error {
 
 // Delete marks an entry as deleted
 func (m *MemtableImpl) Delete(id uint64) bool {
-	if _, ok := m.data.Load(id); ok {
-		m.data.Delete(id)
-		m.delCount.Add(1)
-		return true
+	// Check if the entry exists first
+	_, exists := m.data.Load(id)
+	if !exists {
+		return false
 	}
-	return false
+
+	// If WAL is enabled, log the delete operation
+	if m.walEnabled && m.wal != nil {
+		if err := m.wal.LogDelete(id); err != nil {
+			// Log the error but continue with the operation
+			fmt.Printf("failed to log delete operation: %v\n", err)
+		}
+	}
+
+	m.data.Delete(id)
+	m.delCount.Add(1)
+	return true
 }
 
 // BatchDelete marks multiple entries as deleted
 func (m *MemtableImpl) BatchDelete(ids []uint64) int {
-	count := 0
+	// For batch operations, we first collect which IDs actually exist
+	var existingIds []uint64
 	for _, id := range ids {
-		if m.Delete(id) {
-			count++
+		if _, exists := m.data.Load(id); exists {
+			existingIds = append(existingIds, id)
 		}
 	}
-	return count
+
+	// If none exist, return early
+	if len(existingIds) == 0 {
+		return 0
+	}
+
+	// If WAL is enabled, log the batch delete operation
+	if m.walEnabled && m.wal != nil {
+		if err := m.wal.LogBatchDelete(existingIds); err != nil {
+			// Log the error but continue with the operation
+			fmt.Printf("failed to log batch delete operation: %v\n", err)
+		}
+	}
+
+	// Apply the deletes
+	for _, id := range existingIds {
+		m.data.Delete(id)
+	}
+
+	m.delCount.Add(int64(len(existingIds)))
+	return len(existingIds)
 }
 
 // Get returns the value for a specific ID
