@@ -862,22 +862,18 @@ func TestAggregateBenchmark(t *testing.T) {
 		expectedSum += v
 	}
 
-	// Create a multi-reader with both sources
+	// Create a multi-reader with the two memtables
 	multiReader := NewMultiReader([]AggregateSource{memtable1, memtable2})
 
-	// Perform aggregation
+	// Aggregate the data
 	aggResult, err := multiReader.Aggregate(AggregateOptions{})
 	require.NoError(t, err)
 
 	// Check basic aggregations
-	require.Equal(t, expectedCount, aggResult.Count, "Count should match expected value")
-	require.Equal(t, expectedSum, aggResult.Sum, "Sum should match expected value")
-
-	// Check average
-	if expectedCount > 0 {
-		expectedAvg := float64(expectedSum) / float64(expectedCount)
-		require.InDelta(t, expectedAvg, aggResult.Avg, 0.01, "Average should match expected value")
-	}
+	require.Equal(t, expectedCount, aggResult.Count, "Count should match expected")
+	require.Equal(t, expectedSum, aggResult.Sum, "Sum should match expected")
+	expectedAvg := float64(expectedSum) / float64(expectedCount)
+	require.InDelta(t, expectedAvg, aggResult.Avg, 0.001, "Average should match expected")
 
 	// Log the results
 	t.Logf("Aggregation results - Count: %d, Sum: %d, Avg: %.2f",
@@ -1163,6 +1159,16 @@ func TestMultilevelCompaction(t *testing.T) {
 	require.NoError(t, err)
 	defer reader3.Close()
 
+	// Debug: Verify the individual layers are correct
+	layer1Result := reader1.AggregateWithOptions(col.AggregateOptions{})
+	t.Logf("Layer 1 data: Count=%d, Sum=%d", layer1Result.Count, layer1Result.Sum)
+
+	layer2Result := reader2.AggregateWithOptions(col.AggregateOptions{})
+	t.Logf("Layer 2 data: Count=%d, Sum=%d", layer2Result.Count, layer2Result.Sum)
+
+	layer3Result := reader3.AggregateWithOptions(col.AggregateOptions{})
+	t.Logf("Layer 3 data: Count=%d, Sum=%d", layer3Result.Count, layer3Result.Sum)
+
 	// Create a multi-reader with all sources (for reference)
 	multiReader := NewMultiReader([]AggregateSource{reader1, reader2, reader3})
 	defer multiReader.Close()
@@ -1183,6 +1189,10 @@ func TestMultilevelCompaction(t *testing.T) {
 	compactedReader1, err := col.NewReader(compactedFile1)
 	require.NoError(t, err)
 	defer compactedReader1.Close()
+
+	// Debug: Check what we got after the first compaction
+	comp1Result := compactedReader1.AggregateWithOptions(col.AggregateOptions{})
+	t.Logf("First compaction result: Count=%d, Sum=%d", comp1Result.Count, comp1Result.Sum)
 
 	// Second compaction: Compact the first compacted file with level 3
 	compactedFile2 := filepath.Join(tempDir, "compacted2.col")
@@ -1238,11 +1248,39 @@ func TestMultilevelCompaction(t *testing.T) {
 	t.Logf("Compacted: Count=%d, Sum=%d", compactedResult.Count, compactedResult.Sum)
 	t.Logf("Random updates affected IDs: %v", formatIDsMap(updatedIDs))
 
+	// Debug: Check specific IDs in the compacted result
+	for id := range updatedIDs {
+		// Read the value for this ID directly from the compacted file
+		blocks := finalReader.BlockCount()
+		found := false
+		var actualValue int64
+
+		for i := uint64(0); i < blocks && !found; i++ {
+			ids, values, err := finalReader.GetPairs(i)
+			require.NoError(t, err)
+
+			for j := 0; j < len(ids); j++ {
+				if ids[j] == id {
+					found = true
+					actualValue = values[j]
+					break
+				}
+			}
+		}
+
+		expectedValue := int64(id * 20)
+		if found {
+			t.Logf("ID %d - Expected: %d, Actual: %d", id, expectedValue, actualValue)
+		} else {
+			t.Logf("ID %d - Not found in compacted file!", id)
+		}
+	}
+
+	// Verify compacted file contains all expected IDs
 	// Get bitmap of all IDs in the final compacted file
 	compactedBitmap, err := finalReader.GetGlobalIDBitmap()
 	require.NoError(t, err)
 
-	// Verify compacted file contains all expected IDs
 	for id := range idMap {
 		require.True(t, compactedBitmap.Contains(id),
 			"Compacted file should contain ID %d", id)
