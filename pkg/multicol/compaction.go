@@ -4,7 +4,6 @@ package multicol
 import (
 	"fmt"
 	"os"
-	"sort"
 
 	"vibe-lsm/pkg/col"
 )
@@ -79,53 +78,75 @@ func Compact(left, right *col.Reader, outputPath string, options CompactionOptio
 	}
 	defer writer.Close()
 
-	// First, collect all entries from both readers into a map to handle duplicates
-	// The map key is the ID, and the value is the corresponding value
-	// This ensures that if there are duplicate IDs, the last one (which has precedence) wins
-	entries := make(map[uint64]int64)
+	leftIt := NewBlockIterator(left)
+	rightIt := NewBlockIterator(right)
 
-	// Read all entries from the left reader
-	for i := uint64(0); i < left.BlockCount(); i++ {
-		ids, values, err := left.GetPairs(i)
-		if err != nil {
-			return fmt.Errorf("error reading block %d from left reader: %w", i, err)
-		}
+	var leftID, rightID uint64
+	var leftValue, rightValue int64
+	var hasLeft, hasRight bool
+	fmt.Printf("\n\nstart compaction\n-----\n")
 
-		for j := 0; j < len(ids); j++ {
-			entries[ids[j]] = values[j]
-		}
+	hasLeft, hasRight = leftIt.Next(), rightIt.Next()
+
+	if hasLeft {
+		leftID, leftValue = leftIt.CurrentID(), leftIt.CurrentValue()
+	}
+	if hasRight {
+		rightID, rightValue = rightIt.CurrentID(), rightIt.CurrentValue()
 	}
 
-	// Read all entries from the right reader, overwriting any duplicates
-	// This ensures right (newer) values take precedence
-	for i := uint64(0); i < right.BlockCount(); i++ {
-		ids, values, err := right.GetPairs(i)
-		if err != nil {
-			return fmt.Errorf("error reading block %d from right reader: %w", i, err)
+	for hasLeft || hasRight {
+		if hasLeft && (!hasRight || leftID < rightID) {
+			if err := writer.Add(leftID, leftValue); err != nil {
+				return fmt.Errorf("error adding entry: %w", err)
+			}
+			fmt.Printf("added left %d %d\n", leftID, leftValue)
+			hasLeft = leftIt.Next()
+			if hasLeft {
+				leftID, leftValue = leftIt.CurrentID(), leftIt.CurrentValue()
+				fmt.Printf("left next %d %d\n", leftID, leftValue)
+			} else {
+				fmt.Printf("left exhausted\n")
+			}
+			continue
 		}
 
-		for j := 0; j < len(ids); j++ {
-			entries[ids[j]] = values[j]
+		if hasRight && (!hasLeft || rightID < leftID) {
+			if err := writer.Add(rightID, rightValue); err != nil {
+				return fmt.Errorf("error adding entry: %w", err)
+			}
+			fmt.Printf("added right %d %d\n", rightID, rightValue)
+			hasRight = rightIt.Next()
+			if hasRight {
+				rightID, rightValue = rightIt.CurrentID(), rightIt.CurrentValue()
+				fmt.Printf("right next %d %d\n", rightID, rightValue)
+			} else {
+				fmt.Printf("right exhausted\n")
+			}
+			continue
+		}
+
+		if hasLeft && hasRight && leftID == rightID {
+			// discard left, use right, advance both
+			if err := writer.Add(rightID, rightValue); err != nil {
+				return fmt.Errorf("error adding entry: %w", err)
+			}
+			fmt.Printf("added right %d %d (conflict)\n", rightID, rightValue)
+
+			hasLeft = leftIt.Next()
+			hasRight = rightIt.Next()
+			if hasLeft {
+				leftID, leftValue = leftIt.CurrentID(), leftIt.CurrentValue()
+			}
+			if hasRight {
+				rightID, rightValue = rightIt.CurrentID(), rightIt.CurrentValue()
+			}
+			fmt.Printf("left next %d %d\n", leftID, leftValue)
+			fmt.Printf("right next %d %d\n", rightID, rightValue)
+			continue
 		}
 	}
-
-	// Convert map to sorted array of IDs for consistent output
-	sortedIDs := make([]uint64, 0, len(entries))
-	for id := range entries {
-		sortedIDs = append(sortedIDs, id)
-	}
-
-	// Sort the IDs for consistent and efficient storage
-	sort.Slice(sortedIDs, func(i, j int) bool {
-		return sortedIDs[i] < sortedIDs[j]
-	})
-
-	// Write all entries in sorted order
-	for _, id := range sortedIDs {
-		if err := writer.Add(id, entries[id]); err != nil {
-			return fmt.Errorf("error adding entry: %w", err)
-		}
-	}
+	fmt.Printf("exhausted both\n")
 
 	// We don't need to explicitly flush because the Close method will do it for us
 	// But we will call Close explicitly to ensure proper finalization
