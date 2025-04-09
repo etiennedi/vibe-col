@@ -2,6 +2,7 @@ package multicol
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -405,26 +406,62 @@ func (m *MemtableImpl) Flush(path string) (uint64, error) {
 
 	writeCount := uint64(0)
 
-	// Iterate through all entries and add them to the writer
+	// First collect all entries to sort them
+	var ids []uint64
+	var values []int64
+
+	// Iterate through all entries and collect them
 	m.data.Range(func(key, value interface{}) bool {
 		id := key.(uint64)
 		val := value.(int64)
 
-		if err := writer.Add(id, val); err != nil {
-			// Capture error but continue ranging
-			err = fmt.Errorf("failed to write entry ID %d: %w", id, err)
-			return false
-		}
-
-		writeCount++
+		ids = append(ids, id)
+		values = append(values, val)
 		return true
 	})
 
-	if err != nil {
-		return 0, err
+	// Sort the data by ID (BufferedWriter requires sorted input)
+	sortByID(ids, values)
+
+	// Add the sorted data to the writer
+	for i := 0; i < len(ids); i++ {
+		if err := writer.Add(ids[i], values[i]); err != nil {
+			return writeCount, fmt.Errorf("failed to write entry ID %d: %w", ids[i], err)
+		}
+		writeCount++
 	}
 
 	return writeCount, nil
+}
+
+// sortByID sorts the given IDs and values arrays by the IDs.
+// The values array is reordered to correspond with the sorted IDs.
+func sortByID(ids []uint64, values []int64) {
+	if len(ids) != len(values) {
+		panic("ids and values must have the same length")
+	}
+
+	// Create a slice of index pairs
+	type pair struct {
+		id    uint64
+		value int64
+	}
+
+	pairs := make([]pair, len(ids))
+	for i := 0; i < len(ids); i++ {
+		pairs[i] = pair{ids[i], values[i]}
+	}
+
+	// Sort the pairs by ID
+	sort.Slice(pairs, func(i, j int) bool {
+		return pairs[i].id < pairs[j].id
+	})
+
+	// Copy back to original slices
+	for i := 0; i < len(ids); i++ {
+		ids[i] = pairs[i].id
+		values[i] = pairs[i].value
+	}
 }
 
 // Close implements the AggregateSource interface

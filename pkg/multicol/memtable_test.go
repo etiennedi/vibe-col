@@ -2,8 +2,10 @@ package multicol
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
+	"vibe-lsm/pkg/col"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -336,4 +338,84 @@ func TestMemtableConcurrentOperations(t *testing.T) {
 	written, err := m.Flush(tmpFile.Name())
 	require.NoError(t, err)
 	t.Logf("Flushed %d entries to file", written)
+}
+
+// TestMemtableSortsDataBeforeFlush tests that the memtable correctly sorts data
+// before writing it to a file, as BufferedWriter requires sorted inputs
+func TestMemtableSortsDataBeforeFlush(t *testing.T) {
+	// Create a temporary directory for the test
+	tempDir, err := os.MkdirTemp("", "memtable-sort-test")
+	if err != nil {
+		t.Fatalf("Failed to create temporary directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create a new memtable
+	mt := NewMemtable(nil)
+
+	// Add entries in reverse order
+	numEntries := 100
+	for i := numEntries; i > 0; i-- {
+		err := mt.Add(uint64(i), int64(i*10))
+		if err != nil {
+			t.Fatalf("Failed to add entry: %v", err)
+		}
+	}
+
+	// Flush to a file
+	filePath := filepath.Join(tempDir, "test.col")
+	written, err := mt.Flush(filePath)
+	if err != nil {
+		t.Fatalf("Failed to flush memtable: %v", err)
+	}
+
+	// Verify we wrote all entries
+	if written != uint64(numEntries) {
+		t.Errorf("Expected to write %d entries, but wrote %d", numEntries, written)
+	}
+
+	// Read the file back and verify it's sorted
+	reader, err := col.NewReader(filePath)
+	if err != nil {
+		t.Fatalf("Failed to create reader: %v", err)
+	}
+	defer reader.Close()
+
+	// The file should have at least one block
+	if reader.BlockCount() == 0 {
+		t.Fatal("Expected at least one block in the file")
+	}
+
+	// Read all IDs and values
+	var allIDs []uint64
+	var allValues []int64
+
+	for i := uint64(0); i < reader.BlockCount(); i++ {
+		ids, values, err := reader.GetPairs(i)
+		if err != nil {
+			t.Fatalf("Failed to read block %d: %v", i, err)
+		}
+		allIDs = append(allIDs, ids...)
+		allValues = append(allValues, values...)
+	}
+
+	// Verify we got all entries back
+	if len(allIDs) != numEntries {
+		t.Errorf("Expected %d entries, but got %d", numEntries, len(allIDs))
+	}
+
+	// Verify the data is sorted by ID
+	for i := 1; i < len(allIDs); i++ {
+		if allIDs[i] < allIDs[i-1] {
+			t.Errorf("IDs are not sorted at index %d: %d > %d", i, allIDs[i-1], allIDs[i])
+		}
+	}
+
+	// Also verify the values match the IDs
+	for i := 0; i < len(allIDs); i++ {
+		expectedValue := int64(allIDs[i] * 10)
+		if allValues[i] != expectedValue {
+			t.Errorf("Value mismatch at index %d: expected %d, got %d", i, expectedValue, allValues[i])
+		}
+	}
 }

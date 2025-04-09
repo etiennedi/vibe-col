@@ -84,7 +84,6 @@ func Compact(left, right *col.Reader, outputPath string, options CompactionOptio
 	var leftID, rightID uint64
 	var leftValue, rightValue int64
 	var hasLeft, hasRight bool
-	fmt.Printf("\n\nstart compaction\n-----\n")
 
 	hasLeft, hasRight = leftIt.Next(), rightIt.Next()
 
@@ -100,13 +99,9 @@ func Compact(left, right *col.Reader, outputPath string, options CompactionOptio
 			if err := writer.Add(leftID, leftValue); err != nil {
 				return fmt.Errorf("error adding entry: %w", err)
 			}
-			fmt.Printf("added left %d %d\n", leftID, leftValue)
 			hasLeft = leftIt.Next()
 			if hasLeft {
 				leftID, leftValue = leftIt.CurrentID(), leftIt.CurrentValue()
-				fmt.Printf("left next %d %d\n", leftID, leftValue)
-			} else {
-				fmt.Printf("left exhausted\n")
 			}
 			continue
 		}
@@ -115,13 +110,9 @@ func Compact(left, right *col.Reader, outputPath string, options CompactionOptio
 			if err := writer.Add(rightID, rightValue); err != nil {
 				return fmt.Errorf("error adding entry: %w", err)
 			}
-			fmt.Printf("added right %d %d\n", rightID, rightValue)
 			hasRight = rightIt.Next()
 			if hasRight {
 				rightID, rightValue = rightIt.CurrentID(), rightIt.CurrentValue()
-				fmt.Printf("right next %d %d\n", rightID, rightValue)
-			} else {
-				fmt.Printf("right exhausted\n")
 			}
 			continue
 		}
@@ -131,7 +122,6 @@ func Compact(left, right *col.Reader, outputPath string, options CompactionOptio
 			if err := writer.Add(rightID, rightValue); err != nil {
 				return fmt.Errorf("error adding entry: %w", err)
 			}
-			fmt.Printf("added right %d %d (conflict)\n", rightID, rightValue)
 
 			hasLeft = leftIt.Next()
 			hasRight = rightIt.Next()
@@ -141,12 +131,9 @@ func Compact(left, right *col.Reader, outputPath string, options CompactionOptio
 			if hasRight {
 				rightID, rightValue = rightIt.CurrentID(), rightIt.CurrentValue()
 			}
-			fmt.Printf("left next %d %d\n", leftID, leftValue)
-			fmt.Printf("right next %d %d\n", rightID, rightValue)
 			continue
 		}
 	}
-	fmt.Printf("exhausted both\n")
 
 	// We don't need to explicitly flush because the Close method will do it for us
 	// But we will call Close explicitly to ensure proper finalization
