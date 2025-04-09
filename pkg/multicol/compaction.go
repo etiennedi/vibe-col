@@ -3,6 +3,7 @@ package multicol
 
 import (
 	"fmt"
+	"sort"
 	"vibe-lsm/pkg/col"
 )
 
@@ -135,6 +136,8 @@ func (b *BlockBuffer) IsEmpty() bool {
 
 // Compact merges two column file segments using a merge-sort approach.
 // It uses a BufferedWriter to write the data, with options for target block size and encoding type.
+// The rightReader is assumed to contain newer data than leftReader, so its values take precedence
+// for the same ID.
 func Compact(leftReader, rightReader *col.Reader, outputPath string, opts CompactionOptions) error {
 	// Create the SimpleWriter with the specified encoding options
 	writerOptions := []col.BufferedWriterOption{}
@@ -156,54 +159,36 @@ func Compact(leftReader, rightReader *col.Reader, outputPath string, opts Compac
 	}
 	defer writer.Close()
 
-	// Create iterators for both readers
+	// First collect all IDs and values from both readers
+	allEntries := make(map[uint64]int64)
+
+	// Process left reader (older data)
 	leftIter := NewBlockIterator(leftReader)
+	for leftIter.Next() {
+		allEntries[leftIter.CurrentID()] = leftIter.CurrentValue()
+	}
+
+	// Process right reader (newer data - takes precedence)
 	rightIter := NewBlockIterator(rightReader)
+	for rightIter.Next() {
+		allEntries[rightIter.CurrentID()] = rightIter.CurrentValue()
+	}
 
-	// Prime the iterators
-	leftHasData := leftIter.Next()
-	rightHasData := rightIter.Next()
+	// Get sorted IDs to maintain order
+	sortedIDs := make([]uint64, 0, len(allEntries))
+	for id := range allEntries {
+		sortedIDs = append(sortedIDs, id)
+	}
 
-	// Process all entries from both readers using merge-sort algorithm
-	for leftHasData || rightHasData {
-		// Determine which entry to add to the result next
-		if !leftHasData {
-			// Only right reader has more data
-			if err := writer.Add(rightIter.CurrentID(), rightIter.CurrentValue()); err != nil {
-				return fmt.Errorf("failed to write right entry: %w", err)
-			}
-			rightHasData = rightIter.Next()
-		} else if !rightHasData {
-			// Only left reader has more data
-			if err := writer.Add(leftIter.CurrentID(), leftIter.CurrentValue()); err != nil {
-				return fmt.Errorf("failed to write left entry: %w", err)
-			}
-			leftHasData = leftIter.Next()
-		} else {
-			// Both readers have more data, need to compare IDs
-			leftID := leftIter.CurrentID()
-			rightID := rightIter.CurrentID()
+	// Sort the IDs in ascending order
+	sort.Slice(sortedIDs, func(i, j int) bool {
+		return sortedIDs[i] < sortedIDs[j]
+	})
 
-			if rightID < leftID {
-				// Take right entry (lower ID)
-				if err := writer.Add(rightID, rightIter.CurrentValue()); err != nil {
-					return fmt.Errorf("failed to write right entry: %w", err)
-				}
-				rightHasData = rightIter.Next()
-			} else if leftID < rightID {
-				// Take left entry (lower ID)
-				if err := writer.Add(leftID, leftIter.CurrentValue()); err != nil {
-					return fmt.Errorf("failed to write left entry: %w", err)
-				}
-				leftHasData = leftIter.Next()
-			} else {
-				// Same ID - take right value, advance both iterators
-				if err := writer.Add(rightID, rightIter.CurrentValue()); err != nil {
-					return fmt.Errorf("failed to write right entry: %w", err)
-				}
-				leftHasData = leftIter.Next()
-				rightHasData = rightIter.Next()
-			}
+	// Write all entries in sorted order
+	for _, id := range sortedIDs {
+		if err := writer.Add(id, allEntries[id]); err != nil {
+			return fmt.Errorf("failed to write entry for ID %d: %w", id, err)
 		}
 	}
 
