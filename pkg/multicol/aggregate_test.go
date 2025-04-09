@@ -100,7 +100,7 @@ func TestMultiReaderAggregate(t *testing.T) {
 
 	// Create a MultiReader with all readers (ordered from oldest to newest)
 	readers := []*col.Reader{reader1, reader2, reader3}
-	multiReader := NewMultiReader(readers)
+	multiReader := NewColReaderMultiReader(readers)
 	defer multiReader.Close()
 
 	// Aggregate across all readers
@@ -176,7 +176,7 @@ func TestMultiReaderAggregate(t *testing.T) {
 // TestMultiReaderAggregateEmpty tests the aggregation functionality with empty readers.
 func TestMultiReaderAggregateEmpty(t *testing.T) {
 	// Create a MultiReader with no readers
-	multiReader := NewMultiReader([]*col.Reader{})
+	multiReader := NewColReaderMultiReader([]*col.Reader{})
 
 	// Aggregate should return an empty result
 	result, err := multiReader.Aggregate(AggregateOptions{})
@@ -184,4 +184,153 @@ func TestMultiReaderAggregateEmpty(t *testing.T) {
 	assert.Equal(t, 0, result.Count, "Count should be 0 for empty MultiReader")
 	assert.Equal(t, int64(0), result.Sum, "Sum should be 0 for empty MultiReader")
 	assert.Equal(t, 0.0, result.Avg, "Average should be 0 for empty MultiReader")
+}
+
+func TestEmptyMultiReader(t *testing.T) {
+	mr := NewMultiReader([]AggregateSource{})
+	result, err := mr.Aggregate(AggregateOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, 0, result.Count, "Count should be 0 for empty MultiReader")
+	assert.Equal(t, int64(0), result.Sum, "Sum should be 0 for empty MultiReader")
+	assert.Equal(t, 0.0, result.Avg, "Average should be 0 for empty MultiReader")
+}
+
+func TestMemtableAggregateSource(t *testing.T) {
+	// Create a new memtable
+	mt := NewMemtable(nil)
+
+	// Add some test data
+	testData := []struct {
+		id    uint64
+		value int64
+	}{
+		{1, 10},
+		{2, 20},
+		{3, 30},
+		{4, 40},
+		{5, 50},
+	}
+
+	for _, td := range testData {
+		err := mt.Add(td.id, td.value)
+		require.NoError(t, err)
+	}
+
+	t.Run("AggregateWithOptions without filters", func(t *testing.T) {
+		result := mt.(AggregateSource).AggregateWithOptions(col.AggregateOptions{})
+		require.Equal(t, 5, result.Count)
+		require.Equal(t, int64(10), result.Min)
+		require.Equal(t, int64(50), result.Max)
+		require.Equal(t, int64(150), result.Sum)
+		require.Equal(t, float64(30), result.Avg)
+	})
+
+	t.Run("AggregateWithOptions with allow filter", func(t *testing.T) {
+		filter := sroar.NewBitmap()
+		filter.Set(1)
+		filter.Set(3)
+		filter.Set(5)
+
+		result := mt.(AggregateSource).AggregateWithOptions(col.AggregateOptions{
+			Filter: filter,
+		})
+		require.Equal(t, 3, result.Count)
+		require.Equal(t, int64(10), result.Min)
+		require.Equal(t, int64(50), result.Max)
+		require.Equal(t, int64(90), result.Sum)
+		require.Equal(t, float64(30), result.Avg)
+	})
+
+	t.Run("AggregateWithOptions with deny filter", func(t *testing.T) {
+		denyFilter := sroar.NewBitmap()
+		denyFilter.Set(2)
+		denyFilter.Set(4)
+
+		result := mt.(AggregateSource).AggregateWithOptions(col.AggregateOptions{
+			DenyFilter: denyFilter,
+		})
+		require.Equal(t, 3, result.Count)
+		require.Equal(t, int64(10), result.Min)
+		require.Equal(t, int64(50), result.Max)
+		require.Equal(t, int64(90), result.Sum)
+		require.Equal(t, float64(30), result.Avg)
+	})
+
+	t.Run("AggregateWithOptions with both filters", func(t *testing.T) {
+		filter := sroar.NewBitmap()
+		filter.Set(1)
+		filter.Set(2)
+		filter.Set(3)
+
+		denyFilter := sroar.NewBitmap()
+		denyFilter.Set(2)
+
+		result := mt.(AggregateSource).AggregateWithOptions(col.AggregateOptions{
+			Filter:     filter,
+			DenyFilter: denyFilter,
+		})
+		require.Equal(t, 2, result.Count)
+		require.Equal(t, int64(10), result.Min)
+		require.Equal(t, int64(30), result.Max)
+		require.Equal(t, int64(40), result.Sum)
+		require.Equal(t, float64(20), result.Avg)
+	})
+
+	t.Run("GetGlobalIDBitmap", func(t *testing.T) {
+		bitmap, err := mt.(AggregateSource).GetGlobalIDBitmap()
+		require.NoError(t, err)
+		require.Equal(t, 5, bitmap.GetCardinality())
+		for _, td := range testData {
+			require.True(t, bitmap.Contains(td.id))
+		}
+	})
+
+	t.Run("Close", func(t *testing.T) {
+		err := mt.(AggregateSource).Close()
+		require.NoError(t, err)
+	})
+}
+
+func TestMultiReaderWithMemtable(t *testing.T) {
+	// Create a memtable with some data
+	mt := NewMemtable(nil)
+	for i := uint64(1); i <= 5; i++ {
+		err := mt.Add(i, int64(i*10))
+		require.NoError(t, err)
+	}
+
+	// Create a MultiReader with just the memtable
+	mr := NewMultiReader([]AggregateSource{mt})
+
+	t.Run("Aggregate without filters", func(t *testing.T) {
+		result, err := mr.Aggregate(AggregateOptions{})
+		require.NoError(t, err)
+		require.Equal(t, 5, result.Count)
+		require.Equal(t, int64(10), result.Min)
+		require.Equal(t, int64(50), result.Max)
+		require.Equal(t, int64(150), result.Sum)
+		require.Equal(t, float64(30), result.Avg)
+	})
+
+	t.Run("Aggregate with filter", func(t *testing.T) {
+		filter := sroar.NewBitmap()
+		filter.Set(1)
+		filter.Set(3)
+		filter.Set(5)
+
+		result, err := mr.Aggregate(AggregateOptions{
+			Filter: filter,
+		})
+		require.NoError(t, err)
+		require.Equal(t, 3, result.Count)
+		require.Equal(t, int64(10), result.Min)
+		require.Equal(t, int64(50), result.Max)
+		require.Equal(t, int64(90), result.Sum)
+		require.Equal(t, float64(30), result.Avg)
+	})
+
+	t.Run("Close", func(t *testing.T) {
+		err := mr.Close()
+		require.NoError(t, err)
+	})
 }

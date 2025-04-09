@@ -9,18 +9,34 @@ import (
 	"github.com/weaviate/sroar"
 )
 
-// MultiReader represents a collection of column file readers
-// ordered from oldest (index 0) to newest (last index).
-type MultiReader struct {
-	readers []*col.Reader
+// AggregateSource defines the common interface needed by MultiReader
+type AggregateSource interface {
+	AggregateWithOptions(opts col.AggregateOptions) col.AggregateResult
+	GetGlobalIDBitmap() (*sroar.Bitmap, error)
+	Close() error
 }
 
-// NewMultiReader creates a new MultiReader from a slice of Readers.
-// The readers should be ordered from oldest (index 0) to newest (last index).
-func NewMultiReader(readers []*col.Reader) *MultiReader {
+// MultiReader represents a collection of data sources
+// ordered from oldest (index 0) to newest (last index).
+type MultiReader struct {
+	readers []AggregateSource
+}
+
+// NewMultiReader creates a new MultiReader from a slice of data sources.
+// The sources should be ordered from oldest (index 0) to newest (last index).
+func NewMultiReader(sources []AggregateSource) *MultiReader {
 	return &MultiReader{
-		readers: readers,
+		readers: sources,
 	}
+}
+
+// For backward compatibility
+func NewColReaderMultiReader(readers []*col.Reader) *MultiReader {
+	sources := make([]AggregateSource, len(readers))
+	for i, r := range readers {
+		sources[i] = r // col.Reader directly implements AggregateSource
+	}
+	return NewMultiReader(sources)
 }
 
 // Close closes all readers.

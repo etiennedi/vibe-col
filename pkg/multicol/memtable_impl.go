@@ -1,12 +1,11 @@
 package multicol
 
 import (
-	"bufio"
-	"encoding/binary"
 	"fmt"
-	"os"
 	"sync"
 	"sync/atomic"
+
+	"vibe-lsm/pkg/col"
 
 	"github.com/weaviate/sroar"
 )
@@ -397,56 +396,124 @@ func (m *MemtableImpl) IsEmpty() bool {
 // Flush writes the non-deleted contents to the specified path
 // Returns the number of entries written and any error
 func (m *MemtableImpl) Flush(path string) (uint64, error) {
-	// Create the file
-	file, err := os.Create(path)
+	// Create a BufferedWriter with default options
+	writer, err := col.NewBufferedWriter(path)
 	if err != nil {
 		return 0, err
 	}
-	defer file.Close()
+	defer writer.Close()
 
-	// Use a buffered writer for better performance
-	writer := bufio.NewWriter(file)
-	defer writer.Flush()
+	writeCount := uint64(0)
 
-	// Create a builder for accumulating entries
-	var entries []struct {
-		ID    uint64
-		Value int64
-	}
-
-	// Collect all non-deleted entries
+	// Iterate through all entries and add them to the writer
 	m.data.Range(func(key, value interface{}) bool {
-		entries = append(entries, struct {
-			ID    uint64
-			Value int64
-		}{
-			ID:    key.(uint64),
-			Value: value.(int64),
-		})
+		id := key.(uint64)
+		val := value.(int64)
+
+		if err := writer.Add(id, val); err != nil {
+			// Capture error but continue ranging
+			err = fmt.Errorf("failed to write entry ID %d: %w", id, err)
+			return false
+		}
+
+		writeCount++
 		return true
 	})
 
-	// Write the number of entries as a header
-	numEntries := uint64(len(entries))
-	err = binary.Write(writer, binary.LittleEndian, numEntries)
 	if err != nil {
 		return 0, err
 	}
 
-	// Write each entry
-	for _, entry := range entries {
-		// Write ID
-		err = binary.Write(writer, binary.LittleEndian, entry.ID)
-		if err != nil {
-			return 0, err
-		}
+	return writeCount, nil
+}
 
-		// Write value
-		err = binary.Write(writer, binary.LittleEndian, entry.Value)
-		if err != nil {
-			return 0, err
+// Close implements the AggregateSource interface
+func (m *MemtableImpl) Close() error {
+	// If WAL is enabled, close it
+	if m.walEnabled && m.wal != nil {
+		return m.DisableWAL()
+	}
+	return nil
+}
+
+// AggregateWithOptions implements the AggregateSource interface
+func (m *MemtableImpl) AggregateWithOptions(opts col.AggregateOptions) col.AggregateResult {
+	// If memtable is empty, return zeros
+	if m.IsEmpty() {
+		return col.AggregateResult{
+			Count: 0,
+			Min:   0,
+			Max:   0,
+			Sum:   0,
+			Avg:   0,
 		}
 	}
 
-	return numEntries, nil
+	// Use existing FilteredAggregate for filtered aggregation
+	if opts.Filter != nil || opts.DenyFilter != nil {
+		// Get the effective filter by combining Filter and DenyFilter
+		var effectiveFilter *sroar.Bitmap
+		if opts.Filter != nil {
+			effectiveFilter = opts.Filter.Clone()
+			if opts.DenyFilter != nil {
+				// Remove denied IDs from the filter
+				effectiveFilter = effectiveFilter.AndNot(opts.DenyFilter)
+			}
+		} else if opts.DenyFilter != nil {
+			// Create a bitmap of all IDs and remove denied ones
+			effectiveFilter = sroar.NewBitmap()
+			m.data.Range(func(key, _ interface{}) bool {
+				id := key.(uint64)
+				if !opts.DenyFilter.Contains(id) {
+					effectiveFilter.Set(id)
+				}
+				return true
+			})
+		}
+
+		_, _, minValue, maxValue, sum, count := m.FilteredAggregate(effectiveFilter)
+
+		result := col.AggregateResult{
+			Count: count,
+			Min:   minValue,
+			Max:   maxValue,
+			Sum:   sum,
+		}
+
+		if count > 0 {
+			result.Avg = float64(sum) / float64(count)
+		}
+
+		return result
+	}
+
+	// Use existing Aggregate for unfiltered aggregation
+	_, _, minValue, maxValue, sum, count := m.Aggregate()
+
+	result := col.AggregateResult{
+		Count: count,
+		Min:   minValue,
+		Max:   maxValue,
+		Sum:   sum,
+	}
+
+	if count > 0 {
+		result.Avg = float64(sum) / float64(count)
+	}
+
+	return result
+}
+
+// GetGlobalIDBitmap implements the AggregateSource interface
+func (m *MemtableImpl) GetGlobalIDBitmap() (*sroar.Bitmap, error) {
+	bitmap := sroar.NewBitmap()
+
+	// Add all IDs to the bitmap
+	m.data.Range(func(key, _ interface{}) bool {
+		id := key.(uint64)
+		bitmap.Set(id)
+		return true
+	})
+
+	return bitmap, nil
 }

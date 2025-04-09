@@ -2,32 +2,31 @@
 package multicol
 
 import (
+	"vibe-lsm/pkg/col"
+
 	"github.com/weaviate/sroar"
 )
 
-// Iterator is an interface for iterating over memtable entries
+// Iterator defines the interface for iterating over entries
 type Iterator interface {
 	// Next advances the iterator to the next entry
 	// Returns false if there are no more entries
 	Next() bool
 
-	// HasNext returns true if there are more entries to read
+	// HasNext returns true if there are more entries
 	HasNext() bool
 
-	// Entry returns the current ID-value pair
-	// Only valid after Next() returns true
+	// Entry returns the current entry
 	Entry() (uint64, int64)
 
-	// EntryWithDeleted returns the current ID-value pair and whether it's deleted
-	// Only valid after Next() returns true
+	// EntryWithDeleted returns the current entry and deleted status
 	EntryWithDeleted() (uint64, int64, bool)
 
 	// Close releases any resources used by the iterator
 	Close()
 }
 
-// Memtable is an in-memory data structure that stores key-value pairs
-// and supports efficient writes, reads, and aggregations
+// Memtable defines the interface for an in-memory table
 type Memtable interface {
 	// Add adds a single ID-value pair
 	Add(id uint64, value int64) error
@@ -68,4 +67,9 @@ type Memtable interface {
 
 	// IsEmpty checks if the memtable has any non-deleted entries
 	IsEmpty() bool
+
+	// Additional methods for MultiReader compatibility
+	AggregateWithOptions(opts col.AggregateOptions) col.AggregateResult
+	GetGlobalIDBitmap() (*sroar.Bitmap, error)
+	Close() error
 }
