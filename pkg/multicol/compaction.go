@@ -3,6 +3,7 @@ package multicol
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"vibe-lsm/pkg/col"
 )
@@ -50,12 +51,8 @@ func (it *BlockIterator) Next() bool {
 
 	// If we need to load a new block
 	if it.currentIDs == nil || it.currentIndex >= len(it.currentIDs) {
-		// If we're at the first call, adjust to -1 so we'll load block 0
-		if it.currentIndex == 0 && it.currentBlock == 0 && it.currentIDs == nil {
-			it.currentBlock = ^uint64(0) // Set to max value so when we increment, it becomes 0
-		}
-
-		it.currentBlock++
+		// Reset the current index for the new block
+		it.currentIndex = 0
 
 		// Check if we've processed all blocks
 		if it.currentBlock >= it.blockCount {
@@ -63,17 +60,19 @@ func (it *BlockIterator) Next() bool {
 		}
 
 		// Load the next block
-		ids, values, err := it.reader.GetPairs(it.currentBlock)
-		if err != nil || len(ids) == 0 {
-			return it.Next() // Skip empty/error blocks
+		var err error
+		it.currentIDs, it.currentValues, err = it.reader.GetPairs(it.currentBlock)
+		if err != nil || len(it.currentIDs) == 0 {
+			// Skip empty/error blocks and move to the next one
+			it.currentBlock++
+			return it.Next()
 		}
 
-		it.currentIDs = ids
-		it.currentValues = values
-		it.currentIndex = 0
+		// Move to the next block for the next time we need to load
+		it.currentBlock++
 	}
 
-	return true
+	return it.currentIndex < len(it.currentIDs)
 }
 
 // CurrentID returns the current entry's ID
@@ -134,62 +133,114 @@ func (b *BlockBuffer) IsEmpty() bool {
 	return len(b.ids) == 0
 }
 
-// Compact merges two column file segments using a merge-sort approach.
-// It uses a BufferedWriter to write the data, with options for target block size and encoding type.
-// The rightReader is assumed to contain newer data than leftReader, so its values take precedence
-// for the same ID.
-func Compact(leftReader, rightReader *col.Reader, outputPath string, opts CompactionOptions) error {
-	// Create the SimpleWriter with the specified encoding options
+// Reader is an interface for a column reader
+type Reader interface {
+	GetBlock(blockIdx int) ([]uint64, []int64, error)
+	NumBlocks() int
+}
+
+// WriterOptions contains configuration for the writer
+type WriterOptions struct {
+	EncodingOptions EncodingOptions
+	TargetBlockSize int
+}
+
+// EncodingOptions contains configuration for encoding
+type EncodingOptions struct {
+	Type uint32 // Changed from int to uint32 to match col.WithBufferedEncoding expectation
+}
+
+// NewWriter creates a new column writer
+func NewWriter(file *os.File, opts EncodingOptions, targetBlockSize int) (*col.BufferedWriter, error) {
 	writerOptions := []col.BufferedWriterOption{}
-
-	// If an encoding type is specified, use it
-	if opts.EncodingType != 0 {
-		writerOptions = append(writerOptions, col.WithBufferedEncoding(opts.EncodingType))
+	if opts.Type != 0 {
+		writerOptions = append(writerOptions, col.WithBufferedEncoding(opts.Type))
+	}
+	if targetBlockSize > 0 {
+		writerOptions = append(writerOptions, col.WithBufferedBlockSize(uint32(targetBlockSize)))
 	}
 
-	// If a target block size is specified, use it
-	if opts.TargetBlockSize > 0 {
-		writerOptions = append(writerOptions, col.WithBufferedBlockSize(uint32(opts.TargetBlockSize)))
-	}
+	return col.NewBufferedWriter(file.Name(), writerOptions...)
+}
 
-	// Create the writer with the configured options
-	writer, err := col.NewBufferedWriter(outputPath, writerOptions...)
+// Compact merges two column file segments, preferring values from the right (newer) reader when IDs conflict
+// It writes the result to the specified output file path
+func Compact(left, right *col.Reader, outputPath string, options CompactionOptions) error {
+	// Create the output file
+	outputFile, err := os.Create(outputPath)
 	if err != nil {
-		return fmt.Errorf("failed to create output writer: %w", err)
+		return fmt.Errorf("error creating output file: %w", err)
+	}
+	defer outputFile.Close()
+
+	// Create writer options
+	writerOpts := []col.BufferedWriterOption{}
+	if options.EncodingType != 0 {
+		writerOpts = append(writerOpts, col.WithBufferedEncoding(options.EncodingType))
+	}
+	if options.TargetBlockSize > 0 {
+		writerOpts = append(writerOpts, col.WithBufferedBlockSize(uint32(options.TargetBlockSize)))
+	}
+
+	// Create our writer with the specified encoding options and target block size
+	writer, err := col.NewBufferedWriter(outputPath, writerOpts...)
+	if err != nil {
+		return fmt.Errorf("error creating writer: %w", err)
 	}
 	defer writer.Close()
 
-	// First collect all IDs and values from both readers
-	allEntries := make(map[uint64]int64)
+	// First, collect all entries from both readers into a map to handle duplicates
+	// The map key is the ID, and the value is the corresponding value
+	// This ensures that if there are duplicate IDs, the last one (which has precedence) wins
+	entries := make(map[uint64]int64)
 
-	// Process left reader (older data)
-	leftIter := NewBlockIterator(leftReader)
-	for leftIter.Next() {
-		allEntries[leftIter.CurrentID()] = leftIter.CurrentValue()
+	// Read all entries from the left reader
+	for i := uint64(0); i < left.BlockCount(); i++ {
+		ids, values, err := left.GetPairs(i)
+		if err != nil {
+			return fmt.Errorf("error reading block %d from left reader: %w", i, err)
+		}
+
+		for j := 0; j < len(ids); j++ {
+			entries[ids[j]] = values[j]
+		}
 	}
 
-	// Process right reader (newer data - takes precedence)
-	rightIter := NewBlockIterator(rightReader)
-	for rightIter.Next() {
-		allEntries[rightIter.CurrentID()] = rightIter.CurrentValue()
+	// Read all entries from the right reader, overwriting any duplicates
+	// This ensures right (newer) values take precedence
+	for i := uint64(0); i < right.BlockCount(); i++ {
+		ids, values, err := right.GetPairs(i)
+		if err != nil {
+			return fmt.Errorf("error reading block %d from right reader: %w", i, err)
+		}
+
+		for j := 0; j < len(ids); j++ {
+			entries[ids[j]] = values[j]
+		}
 	}
 
-	// Get sorted IDs to maintain order
-	sortedIDs := make([]uint64, 0, len(allEntries))
-	for id := range allEntries {
+	// Convert map to sorted array of IDs for consistent output
+	sortedIDs := make([]uint64, 0, len(entries))
+	for id := range entries {
 		sortedIDs = append(sortedIDs, id)
 	}
 
-	// Sort the IDs in ascending order
+	// Sort the IDs for consistent and efficient storage
 	sort.Slice(sortedIDs, func(i, j int) bool {
 		return sortedIDs[i] < sortedIDs[j]
 	})
 
 	// Write all entries in sorted order
 	for _, id := range sortedIDs {
-		if err := writer.Add(id, allEntries[id]); err != nil {
-			return fmt.Errorf("failed to write entry for ID %d: %w", id, err)
+		if err := writer.Add(id, entries[id]); err != nil {
+			return fmt.Errorf("error adding entry: %w", err)
 		}
+	}
+
+	// We don't need to explicitly flush because the Close method will do it for us
+	// But we will call Close explicitly to ensure proper finalization
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("error closing writer: %w", err)
 	}
 
 	return nil
