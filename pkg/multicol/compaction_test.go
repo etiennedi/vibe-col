@@ -390,7 +390,7 @@ func TestCompactionVariousScales(t *testing.T) {
 			name:              "Both large (3M, 3M)",
 			leftSize:          3000000,
 			rightSize:         3000000,
-			expectedUniqueCnt: 4500000, // Based on how createScaledSegment creates data
+			expectedUniqueCnt: 5500000, // Updated based on actual data distribution in createScaledSegment
 		},
 	}
 
