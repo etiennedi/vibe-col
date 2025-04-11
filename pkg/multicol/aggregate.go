@@ -13,6 +13,7 @@ import (
 type AggregateSource interface {
 	AggregateWithOptions(opts col.AggregateOptions) col.AggregateResult
 	GetGlobalIDBitmap() (*sroar.Bitmap, error)
+	GetDeletedIDBitmap() (*sroar.Bitmap, error)
 	Close() error
 }
 
@@ -94,8 +95,15 @@ func (mr *MultiReader) Aggregate(opts AggregateOptions) (col.AggregateResult, er
 			return col.AggregateResult{}, fmt.Errorf("failed to get global ID bitmap from reader %d: %w", i, err)
 		}
 
+		// Get the deleted ID bitmap for this reader
+		deletedIDs, err := reader.GetDeletedIDBitmap()
+		if err != nil {
+			return col.AggregateResult{}, fmt.Errorf("failed to get deleted ID bitmap from reader %d: %w", i, err)
+		}
+
 		// Add all IDs from this reader to the deny bitmap for older readers
-		denyBitmap = denyBitmap.Or(globalIDs)
+		// This includes both updated and deleted IDs
+		denyBitmap = denyBitmap.Or(globalIDs).Or(deletedIDs)
 
 		// Merge the results
 		if result.Count == 0 {

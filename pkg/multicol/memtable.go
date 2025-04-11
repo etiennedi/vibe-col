@@ -71,5 +71,6 @@ type Memtable interface {
 	// Additional methods for MultiReader compatibility
 	AggregateWithOptions(opts col.AggregateOptions) col.AggregateResult
 	GetGlobalIDBitmap() (*sroar.Bitmap, error)
+	GetDeletedIDBitmap() (*sroar.Bitmap, error)
 	Close() error
 }

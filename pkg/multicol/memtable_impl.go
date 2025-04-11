@@ -19,6 +19,7 @@ type MemtableImpl struct {
 	delCount   atomic.Int64
 	wal        WALManager
 	walEnabled bool
+	deleted    sync.Map
 }
 
 // DurableMemtable extends the Memtable interface to add WAL support
@@ -179,6 +180,10 @@ func (m *MemtableImpl) Delete(id uint64) bool {
 		}
 	}
 
+	// Store the ID in the deleted map
+	m.deleted.Store(id, true)
+
+	// Remove from the data map
 	m.data.Delete(id)
 	m.delCount.Add(1)
 	return true
@@ -209,6 +214,10 @@ func (m *MemtableImpl) BatchDelete(ids []uint64) int {
 
 	// Apply the deletes
 	for _, id := range existingIds {
+		// Store the ID in the deleted map
+		m.deleted.Store(id, true)
+
+		// Remove from the data map
 		m.data.Delete(id)
 	}
 
@@ -553,4 +562,29 @@ func (m *MemtableImpl) GetGlobalIDBitmap() (*sroar.Bitmap, error) {
 	})
 
 	return bitmap, nil
+}
+
+// GetDeletedIDBitmap implements the AggregateSource interface
+func (m *MemtableImpl) GetDeletedIDBitmap() (*sroar.Bitmap, error) {
+	bitmap := sroar.NewBitmap()
+
+	// Add all deleted IDs to the bitmap
+	m.deleted.Range(func(key, _ interface{}) bool {
+		id := key.(uint64)
+		bitmap.Set(id)
+		return true
+	})
+
+	return bitmap, nil
+}
+
+// NewMemtableImpl creates a new in-memory table
+func NewMemtableImpl(walManager WALManager) *MemtableImpl {
+	m := &MemtableImpl{
+		data:       sync.Map{},
+		deleted:    sync.Map{},
+		wal:        walManager,
+		walEnabled: walManager != nil,
+	}
+	return m
 }
