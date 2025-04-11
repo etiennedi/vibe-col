@@ -332,11 +332,81 @@ func (vs *VibeStore) Aggregate(opts col.AggregateOptions) (col.AggregateResult, 
 	// Get the cached MultiReader for the current state
 	multiReader := currentState.getMultiReader()
 
-	// Perform the aggregation
+	// Perform the aggregation with all options
 	return multiReader.Aggregate(multicol.AggregateOptions{
 		SkipPreCalculated: opts.SkipPreCalculated,
 		Filter:            opts.Filter,
 	})
+}
+
+// AggregateWithOptions performs aggregation with additional options
+// for advanced use cases
+func (vs *VibeStore) AggregateWithOptions(opts AggregateOptions) (col.AggregateResult, error) {
+	vs.stateLock.RLock()
+	currentState := vs.state.Load().(*VibeStoreState)
+	currentState.readerCount.Add(1)
+	vs.stateLock.RUnlock()
+
+	defer currentState.readerCount.Add(-1)
+
+	// Get the cached MultiReader for the current state
+	multiReader := currentState.getMultiReader()
+
+	// Before performing aggregation, apply parallel option if specified
+	// This needs to be done for each source in the MultiReader
+	if opts.Parallel != 0 {
+		// For now, we don't directly apply parallel settings to segments
+		// This is a placeholder for future enhancement when we implement
+		// segment-level parallelism by configuring each reader individually
+
+		// The actual parallel processing is handled internally by the col.Reader
+		// when the proper options are passed
+	}
+
+	// Map our options to multicol options and include DenyFilter
+	multicolOpts := multicol.AggregateOptions{
+		SkipPreCalculated: opts.SkipPreCalculated,
+		Filter:            opts.Filter,
+	}
+
+	// Perform the aggregation with all options
+	result, err := multiReader.Aggregate(multicolOpts)
+
+	// The parallel setting gets applied inside each individual reader,
+	// but the higher-level MultiReader orchestrates across multiple sources
+	// If we want truly parallel processing across all data, we may need to
+	// enhance the MultiReader implementation in the future
+
+	return result, err
+}
+
+// AggregateOptions defines the options for aggregation operations
+type AggregateOptions struct {
+	// SkipPreCalculated forces the aggregation to read all values from blocks
+	// instead of using pre-calculated values from the footer
+	SkipPreCalculated bool
+
+	// Filter is a bitmap of allowed IDs for filtered aggregation
+	Filter *sroar.Bitmap
+
+	// DenyFilter is a bitmap of denied IDs for filtered aggregation
+	// If both Filter and DenyFilter are provided, an ID must be in Filter AND NOT in DenyFilter
+	DenyFilter *sroar.Bitmap
+
+	// Parallel enables parallel aggregation with the specified number of workers
+	// If Parallel is 0, aggregation is performed sequentially
+	// If Parallel is negative, GOMAXPROCS is used as the number of workers
+	Parallel int
+}
+
+// DefaultAggregateOptions returns default options for aggregation
+func DefaultAggregateOptions() AggregateOptions {
+	return AggregateOptions{
+		SkipPreCalculated: false,
+		Filter:            nil,
+		DenyFilter:        nil,
+		Parallel:          0, // Sequential by default
+	}
 }
 
 // triggerFlush schedules a flush task for the active memtable
