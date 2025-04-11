@@ -78,6 +78,12 @@ func Compact(left, right *col.Reader, outputPath string, options CompactionOptio
 	}
 	defer writer.Close()
 
+	// Get the deleted ID bitmap from the right (newer) file
+	deletedIDs, err := right.GetDeletedIDBitmap()
+	if err != nil {
+		return fmt.Errorf("error getting deleted ID bitmap: %w", err)
+	}
+
 	leftIt := NewBlockIterator(left)
 	rightIt := NewBlockIterator(right)
 
@@ -96,8 +102,12 @@ func Compact(left, right *col.Reader, outputPath string, options CompactionOptio
 
 	for hasLeft || hasRight {
 		if hasLeft && (!hasRight || leftID < rightID) {
-			if err := writer.Add(leftID, leftValue); err != nil {
-				return fmt.Errorf("error adding entry: %w", err)
+			// Only in left file
+			// Skip if ID is in the deleted bitmap
+			if !deletedIDs.Contains(leftID) {
+				if err := writer.Add(leftID, leftValue); err != nil {
+					return fmt.Errorf("error adding entry: %w", err)
+				}
 			}
 			hasLeft = leftIt.Next()
 			if hasLeft {
@@ -107,8 +117,11 @@ func Compact(left, right *col.Reader, outputPath string, options CompactionOptio
 		}
 
 		if hasRight && (!hasLeft || rightID < leftID) {
-			if err := writer.Add(rightID, rightValue); err != nil {
-				return fmt.Errorf("error adding entry: %w", err)
+			// Only in right file
+			if !deletedIDs.Contains(rightID) {
+				if err := writer.Add(rightID, rightValue); err != nil {
+					return fmt.Errorf("error adding entry: %w", err)
+				}
 			}
 			hasRight = rightIt.Next()
 			if hasRight {
@@ -119,8 +132,10 @@ func Compact(left, right *col.Reader, outputPath string, options CompactionOptio
 
 		if hasLeft && hasRight && leftID == rightID {
 			// discard left, use right, advance both
-			if err := writer.Add(rightID, rightValue); err != nil {
-				return fmt.Errorf("error adding entry: %w", err)
+			if !deletedIDs.Contains(rightID) {
+				if err := writer.Add(rightID, rightValue); err != nil {
+					return fmt.Errorf("error adding entry: %w", err)
+				}
 			}
 
 			hasLeft = leftIt.Next()
@@ -134,6 +149,17 @@ func Compact(left, right *col.Reader, outputPath string, options CompactionOptio
 			continue
 		}
 	}
+
+	// Get the deleted ID bitmap from the left (older) file
+	leftDeletedIDs, err := left.GetDeletedIDBitmap()
+	if err != nil {
+		return fmt.Errorf("error getting deleted ID bitmap from left file: %w", err)
+	}
+
+	// Merge deleted IDs from both files and add to writer
+	// This preserves all deletions when we compact
+	writer.AddDeletedIDBitmap(deletedIDs)
+	writer.AddDeletedIDBitmap(leftDeletedIDs)
 
 	// We don't need to explicitly flush because the Close method will do it for us
 	// But we will call Close explicitly to ensure proper finalization

@@ -58,6 +58,12 @@ func (w *Writer) AddDeletedID(id uint64) {
 	w.deletedIDs.Set(id)
 }
 
+// AddDeletedIDBitmap adds all IDs from the provided bitmap to the deleted IDs bitmap
+func (w *Writer) AddDeletedIDBitmap(bitmap *sroar.Bitmap) {
+	// Merge the provided bitmap with our deleted IDs bitmap
+	w.deletedIDs = w.deletedIDs.Or(bitmap)
+}
+
 // BatchAddDeletedIDs adds multiple deleted IDs to the writer
 func (w *Writer) BatchAddDeletedIDs(ids []uint64) {
 	for _, id := range ids {

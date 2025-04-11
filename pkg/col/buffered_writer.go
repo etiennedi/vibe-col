@@ -401,3 +401,9 @@ func (bw *BufferedWriter) BatchAddDeletedIDs(ids []uint64) {
 		bw.deletedIDs.Set(id)
 	}
 }
+
+// AddDeletedIDBitmap adds all IDs from the provided bitmap to the deleted IDs bitmap
+func (bw *BufferedWriter) AddDeletedIDBitmap(bitmap *sroar.Bitmap) {
+	// Merge the provided bitmap with our deleted IDs bitmap
+	bw.deletedIDs = bw.deletedIDs.Or(bitmap)
+}

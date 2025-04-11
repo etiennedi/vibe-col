@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 	"vibe-lsm/pkg/col"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -944,4 +946,145 @@ func extractBlockSizesFromDebugInfo(debugInfo string) []int64 {
 	}
 
 	return blockSizes
+}
+
+// TestCompactionWithDeletedIDs tests that the compaction process correctly handles deleted IDs
+func TestCompactionWithDeletedIDs(t *testing.T) {
+	// Create three temporary files for testing
+	leftFile, err := os.CreateTemp("", "compaction_test_left_*.col")
+	require.NoError(t, err)
+	defer os.Remove(leftFile.Name())
+	leftFile.Close()
+
+	rightFile, err := os.CreateTemp("", "compaction_test_right_*.col")
+	require.NoError(t, err)
+	defer os.Remove(rightFile.Name())
+	rightFile.Close()
+
+	outputFile, err := os.CreateTemp("", "compaction_test_output_*.col")
+	require.NoError(t, err)
+	defer os.Remove(outputFile.Name())
+	outputFile.Close()
+
+	// Create test data for the left file
+	leftWriter, err := col.NewBufferedWriter(leftFile.Name())
+	require.NoError(t, err)
+
+	// Add entries to the left file
+	leftIDs := []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	leftValues := []int64{100, 200, 300, 400, 500, 600, 700, 800, 900, 1000}
+	for i, id := range leftIDs {
+		err = leftWriter.Add(id, leftValues[i])
+		require.NoError(t, err)
+	}
+	err = leftWriter.Close()
+	require.NoError(t, err)
+
+	// Create test data for the right file
+	rightWriter, err := col.NewBufferedWriter(rightFile.Name())
+	require.NoError(t, err)
+
+	// Add entries to the right file (some overlap with left, some new)
+	rightIDs := []uint64{5, 6, 7, 8, 11, 12, 13}
+	rightValues := []int64{501, 601, 701, 801, 1100, 1200, 1300}
+	for i, id := range rightIDs {
+		err = rightWriter.Add(id, rightValues[i])
+		require.NoError(t, err)
+	}
+
+	// Add deleted IDs to the right file
+	deletedIDs := []uint64{3, 4, 12} // Delete some IDs from left file and one from right file
+	rightWriter.BatchAddDeletedIDs(deletedIDs)
+
+	err = rightWriter.Close()
+	require.NoError(t, err)
+
+	// Open the files for reading
+	leftReader, err := col.NewReader(leftFile.Name())
+	require.NoError(t, err)
+	defer leftReader.Close()
+
+	rightReader, err := col.NewReader(rightFile.Name())
+	require.NoError(t, err)
+	defer rightReader.Close()
+
+	// Perform the compaction
+	err = Compact(leftReader, rightReader, outputFile.Name(), DefaultCompactionOptions())
+	require.NoError(t, err)
+
+	// Open the output file for validation
+	outputReader, err := col.NewReader(outputFile.Name())
+	require.NoError(t, err)
+	defer outputReader.Close()
+
+	// Create a block iterator for the output file
+	it := NewBlockIterator(outputReader)
+
+	// Collect all IDs and values from the output
+	outputIDs := make([]uint64, 0)
+	outputValues := make([]int64, 0)
+	for it.Next() {
+		outputIDs = append(outputIDs, it.CurrentID())
+		outputValues = append(outputValues, it.CurrentValue())
+	}
+
+	// Define the expected IDs and values after compaction:
+	// - IDs 1, 2, 9, 10 from left (not in right, not deleted)
+	// - IDs 5, 6, 7, 8 from right (overlapping, use right values)
+	// - IDs 11, 13 from right (new, not deleted)
+	// - IDs 3, 4 are deleted (from left) and should not appear
+	// - ID 12 is deleted (from right) and should not appear
+	expectedIDs := []uint64{1, 2, 5, 6, 7, 8, 9, 10, 11, 13}
+	expectedValues := []int64{100, 200, 501, 601, 701, 801, 900, 1000, 1100, 1300}
+
+	// Check the length of the output
+	assert.Equal(t, len(expectedIDs), len(outputIDs), "Output should have the expected number of entries")
+
+	// Sort the output IDs and values to make comparison easier
+	type idValue struct {
+		id    uint64
+		value int64
+	}
+	outputPairs := make([]idValue, len(outputIDs))
+	for i := range outputIDs {
+		outputPairs[i] = idValue{outputIDs[i], outputValues[i]}
+	}
+	sort.Slice(outputPairs, func(i, j int) bool {
+		return outputPairs[i].id < outputPairs[j].id
+	})
+	for i := range outputPairs {
+		outputIDs[i] = outputPairs[i].id
+		outputValues[i] = outputPairs[i].value
+	}
+
+	// Sort the expected IDs and values the same way
+	expectedPairs := make([]idValue, len(expectedIDs))
+	for i := range expectedIDs {
+		expectedPairs[i] = idValue{expectedIDs[i], expectedValues[i]}
+	}
+	sort.Slice(expectedPairs, func(i, j int) bool {
+		return expectedPairs[i].id < expectedPairs[j].id
+	})
+	for i := range expectedPairs {
+		expectedIDs[i] = expectedPairs[i].id
+		expectedValues[i] = expectedPairs[i].value
+	}
+
+	// Check that each ID and value match our expectations
+	for i := range expectedIDs {
+		assert.Equal(t, expectedIDs[i], outputIDs[i], "Output ID at position %d should match expected", i)
+		assert.Equal(t, expectedValues[i], outputValues[i], "Output value at position %d should match expected", i)
+	}
+
+	// Verify that deleted IDs were properly carried forward
+	deletedBitmap, err := outputReader.GetDeletedIDBitmap()
+	require.NoError(t, err)
+
+	// Check that all originally deleted IDs are in the output's deleted bitmap
+	for _, id := range deletedIDs {
+		assert.True(t, deletedBitmap.Contains(id), "Output deleted bitmap should contain ID %d", id)
+	}
+
+	// Check that the total number of deleted IDs is correct
+	assert.Equal(t, len(deletedIDs), deletedBitmap.GetCardinality(), "Output should have %d deleted IDs", len(deletedIDs))
 }
