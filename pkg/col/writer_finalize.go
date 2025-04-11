@@ -41,6 +41,40 @@ func (w *Writer) writeGlobalIDBitmap() (uint64, uint64, error) {
 	return uint64(bitmapOffset), uint64(bitmapSize), nil
 }
 
+// writeDeletedIDBitmap writes the deleted ID bitmap to the file
+func (w *Writer) writeDeletedIDBitmap() (uint64, uint64, error) {
+	// Get the current position - this is where the bitmap will start
+	bitmapOffset, err := w.file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to get deleted bitmap offset: %w", err)
+	}
+
+	// Get the buffer from the bitmap
+	// The sroar bitmap is already a serialized representation
+	buf := w.deletedIDs.ToBuffer()
+
+	// Write the size of the bitmap
+	if err := binary.Write(w.file, binary.LittleEndian, uint32(len(buf))); err != nil {
+		return 0, 0, fmt.Errorf("failed to write deleted bitmap size: %w", err)
+	}
+
+	// Write the bitmap data
+	if _, err := w.file.Write(buf); err != nil {
+		return 0, 0, fmt.Errorf("failed to write deleted bitmap data: %w", err)
+	}
+
+	// Get the current position - this is where the bitmap ends
+	currentPos, err := w.file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to get current position: %w", err)
+	}
+
+	// Calculate the size of the bitmap (including the size field)
+	bitmapSize := currentPos - bitmapOffset
+
+	return uint64(bitmapOffset), uint64(bitmapSize), nil
+}
+
 // FinalizeAndClose finalizes the file by writing the footer and closes the file
 func (w *Writer) FinalizeAndClose() error {
 	if err := w.Finalize(); err != nil {
@@ -55,6 +89,12 @@ func (w *Writer) Finalize() error {
 	bitmapOffset, bitmapSize, err := w.writeGlobalIDBitmap()
 	if err != nil {
 		return fmt.Errorf("failed to write global ID bitmap: %w", err)
+	}
+
+	// Write the deleted ID bitmap
+	deletedBitmapOffset, deletedBitmapSize, err := w.writeDeletedIDBitmap()
+	if err != nil {
+		return fmt.Errorf("failed to write deleted ID bitmap: %w", err)
 	}
 
 	// Seek to the end to write the footer
@@ -143,11 +183,11 @@ func (w *Writer) Finalize() error {
 	}
 
 	// Update the header with final block count and bitmap information
-	return w.updateHeader(bitmapOffset, bitmapSize, footerStart)
+	return w.updateHeader(bitmapOffset, bitmapSize, deletedBitmapOffset, deletedBitmapSize, footerStart)
 }
 
 // updateHeader updates the file header with the final information
-func (w *Writer) updateHeader(bitmapOffset, bitmapSize uint64, footerStart int64) error {
+func (w *Writer) updateHeader(bitmapOffset, bitmapSize, deletedBitmapOffset, deletedBitmapSize uint64, footerStart int64) error {
 	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("failed to seek to start: %w", err)
 	}
@@ -156,6 +196,8 @@ func (w *Writer) updateHeader(bitmapOffset, bitmapSize uint64, footerStart int64
 	header := NewFileHeader(w.blockCount, w.blockSizeTarget, w.encodingType)
 	header.BitmapOffset = bitmapOffset
 	header.BitmapSize = bitmapSize
+	header.DeletedBitmapOffset = deletedBitmapOffset
+	header.DeletedBitmapSize = deletedBitmapSize
 	header.CreationTime = uint64(time.Now().Unix())
 
 	// Serialize the header with footer offset

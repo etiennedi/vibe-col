@@ -3,7 +3,7 @@ package col
 // Constants for file format
 const (
 	// Size constants
-	headerSize      = 64
+	headerSize      = 96 // Increased from 64 to 96 bytes to accommodate deleted IDs bitmap
 	blockHeaderSize = 96
 	blockLayoutSize = 16
 

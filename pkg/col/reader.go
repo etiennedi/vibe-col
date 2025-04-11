@@ -10,13 +10,15 @@ import (
 
 // Reader reads a column file
 type Reader struct {
-	file           *os.File
-	fileSize       int64
-	header         FileHeader
-	footerMeta     FooterMetadata
-	blockIndex     []FooterEntry
-	globalIDs      *sroar.Bitmap
-	cacheGlobalIDs bool // Whether to cache the global ID bitmap
+	file            *os.File
+	fileSize        int64
+	header          FileHeader
+	footerMeta      FooterMetadata
+	blockIndex      []FooterEntry
+	globalIDs       *sroar.Bitmap
+	deletedIDs      *sroar.Bitmap
+	cacheGlobalIDs  bool // Whether to cache the global ID bitmap
+	cacheDeletedIDs bool // Whether to cache the deleted IDs bitmap
 }
 
 // NewReader creates a new column file reader
@@ -35,9 +37,10 @@ func NewReader(filename string) (*Reader, error) {
 	fileSize := fileInfo.Size()
 
 	reader := &Reader{
-		file:           file,
-		fileSize:       fileSize,
-		cacheGlobalIDs: false, // Caching is off by default
+		file:            file,
+		fileSize:        fileSize,
+		cacheGlobalIDs:  false, // Caching is off by default
+		cacheDeletedIDs: false, // Caching is off by default
 	}
 
 	// Read the file header
@@ -215,6 +218,102 @@ func (r *Reader) GetGlobalIDBitmap() (*sroar.Bitmap, error) {
 	// Only cache if enabled
 	if r.cacheGlobalIDs {
 		r.globalIDs = bitmap
+	}
+
+	return bitmap, nil
+}
+
+// EnableDeletedIDBitmapCaching enables caching of the deleted ID bitmap
+func (r *Reader) EnableDeletedIDBitmapCaching() {
+	r.cacheDeletedIDs = true
+}
+
+// DisableDeletedIDBitmapCaching disables caching of the deleted ID bitmap
+func (r *Reader) DisableDeletedIDBitmapCaching() {
+	r.cacheDeletedIDs = false
+	r.deletedIDs = nil // Clear any cached bitmap
+}
+
+// GetDeletedIDBitmap returns the deleted ID bitmap from the file
+// If the file doesn't have a deleted ID bitmap, it returns an empty bitmap
+// The bitmap is cached only if caching is enabled
+func (r *Reader) GetDeletedIDBitmap() (*sroar.Bitmap, error) {
+	// If we've already loaded the bitmap and caching is enabled, return it
+	if r.deletedIDs != nil && r.cacheDeletedIDs {
+		return r.deletedIDs, nil
+	}
+
+	// If the file doesn't have a bitmap, return an empty one
+	if r.header.DeletedBitmapOffset == 0 || r.header.DeletedBitmapSize == 0 {
+		bitmap := sroar.NewBitmap()
+		// Only cache if enabled
+		if r.cacheDeletedIDs {
+			r.deletedIDs = bitmap
+		}
+		return bitmap, nil
+	}
+
+	// Create an empty bitmap as fallback
+	emptyBitmap := sroar.NewBitmap()
+
+	// Read the bitmap size (first 4 bytes)
+	sizeBuf, err := r.readBytesAt(int64(r.header.DeletedBitmapOffset), 4)
+	if err != nil {
+		// If we can't read the bitmap size, return an empty bitmap
+		if r.cacheDeletedIDs {
+			r.deletedIDs = emptyBitmap
+		}
+		return emptyBitmap, nil
+	}
+	bitmapSize := binary.LittleEndian.Uint32(sizeBuf)
+
+	// If bitmap size is 0, return an empty bitmap
+	if bitmapSize == 0 {
+		if r.cacheDeletedIDs {
+			r.deletedIDs = emptyBitmap
+		}
+		return emptyBitmap, nil
+	}
+
+	// Read the bitmap data
+	bitmapBuf, err := r.readBytesAt(int64(r.header.DeletedBitmapOffset)+4, int(bitmapSize))
+	if err != nil {
+		// If we can't read the bitmap data, return an empty bitmap
+		if r.cacheDeletedIDs {
+			r.deletedIDs = emptyBitmap
+		}
+		return emptyBitmap, nil
+	}
+
+	// If bitmap buffer is empty, return an empty bitmap
+	if len(bitmapBuf) == 0 {
+		if r.cacheDeletedIDs {
+			r.deletedIDs = emptyBitmap
+		}
+		return emptyBitmap, nil
+	}
+
+	var bitmap *sroar.Bitmap
+	// Use a defer-recover to catch any panics from sroar.FromBuffer
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// If there's a panic, set bitmap to empty
+				bitmap = emptyBitmap
+			}
+		}()
+		// Try to create a bitmap from the buffer
+		bitmap = sroar.FromBuffer(bitmapBuf)
+	}()
+
+	// If bitmap is nil (shouldn't happen, but just to be safe), use empty bitmap
+	if bitmap == nil {
+		bitmap = emptyBitmap
+	}
+
+	// Only cache if enabled
+	if r.cacheDeletedIDs {
+		r.deletedIDs = bitmap
 	}
 
 	return bitmap, nil

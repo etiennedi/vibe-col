@@ -35,6 +35,7 @@ type BufferedWriter struct {
 	blockSizeTarget uint32
 	blockIndex      []FooterEntry // Detailed index of blocks
 	globalIDs       *sroar.Bitmap
+	deletedIDs      *sroar.Bitmap
 	closed          bool
 
 	// Position tracking to reduce Seek operations
@@ -61,9 +62,12 @@ func NewBufferedWriter(filename string, options ...BufferedWriterOption) (*Buffe
 		blockSizeTarget: defaultBlockSize,
 		blockIndex:      make([]FooterEntry, 0),
 		globalIDs:       sroar.NewBitmap(),
+		deletedIDs:      sroar.NewBitmap(),
 		closed:          false,
 		currentPosition: 0,
 		pendingData:     nil,
+		lastID:          0,
+		lastValue:       0,
 	}
 
 	// Apply options
@@ -384,4 +388,16 @@ func (bw *BufferedWriter) writeAndTrack(data []byte) (int, error) {
 	}
 	bw.currentPosition += int64(n)
 	return n, nil
+}
+
+// AddDeletedID adds a deleted ID to the writer
+func (bw *BufferedWriter) AddDeletedID(id uint64) {
+	bw.deletedIDs.Set(id)
+}
+
+// BatchAddDeletedIDs adds multiple deleted IDs to the writer
+func (bw *BufferedWriter) BatchAddDeletedIDs(ids []uint64) {
+	for _, id := range ids {
+		bw.deletedIDs.Set(id)
+	}
 }

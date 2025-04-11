@@ -80,12 +80,44 @@ func (bw *BufferedWriter) writeHeader() error {
 	return nil
 }
 
+// writeDeletedIDBitmap writes the deleted ID bitmap and returns its offset and size
+func (bw *BufferedWriter) writeDeletedIDBitmap() (uint64, uint64, error) {
+	// Get current position from tracker
+	bitmapOffset := bw.currentPosition
+
+	// Serialize bitmap
+	bitmapData := bw.deletedIDs.ToBuffer()
+	bitmapSize := uint32(len(bitmapData))
+
+	// Create a buffer for bitmap size (4 bytes)
+	bitmapSizeBuf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(bitmapSizeBuf, bitmapSize)
+
+	// Write bitmap size
+	if _, err := bw.writeAndTrack(bitmapSizeBuf); err != nil {
+		return 0, 0, fmt.Errorf("failed to write deleted bitmap size: %w", err)
+	}
+
+	// Write the bitmap data
+	if _, err := bw.writeAndTrack(bitmapData); err != nil {
+		return 0, 0, fmt.Errorf("failed to write deleted bitmap data: %w", err)
+	}
+
+	return uint64(bitmapOffset), uint64(4 + bitmapSize), nil
+}
+
 // finalize writes the footer and updates the header
 func (bw *BufferedWriter) finalize() error {
 	// Write the global ID bitmap
 	bitmapOffset, bitmapSize, err := bw.writeGlobalIDBitmap()
 	if err != nil {
 		return fmt.Errorf("failed to write global ID bitmap: %w", err)
+	}
+
+	// Write the deleted ID bitmap
+	deletedBitmapOffset, deletedBitmapSize, err := bw.writeDeletedIDBitmap()
+	if err != nil {
+		return fmt.Errorf("failed to write deleted ID bitmap: %w", err)
 	}
 
 	// Get current position from tracker - this is where the footer will start
@@ -118,56 +150,42 @@ func (bw *BufferedWriter) finalize() error {
 	}
 
 	// Write block index entries
-	if len(bw.blockIndex) > 0 {
-		// Each footer entry should be 56 bytes (struct FooterEntry)
-		// Allocate a buffer for all entries at once
-		entrySize := 56
-		entriesBuf := make([]byte, entrySize*len(bw.blockIndex))
-
-		for i, entry := range bw.blockIndex {
-			offset := i * entrySize
-
-			// Write entry fields to buffer
-			binary.LittleEndian.PutUint64(entriesBuf[offset:], entry.BlockOffset)
-			offset += 8
-
-			binary.LittleEndian.PutUint32(entriesBuf[offset:], entry.BlockSize)
-			offset += 4
-
-			binary.LittleEndian.PutUint64(entriesBuf[offset:], entry.MinID)
-			offset += 8
-
-			binary.LittleEndian.PutUint64(entriesBuf[offset:], entry.MaxID)
-			offset += 8
-
-			binary.LittleEndian.PutUint64(entriesBuf[offset:], entry.MinValue)
-			offset += 8
-
-			binary.LittleEndian.PutUint64(entriesBuf[offset:], entry.MaxValue)
-			offset += 8
-
-			binary.LittleEndian.PutUint64(entriesBuf[offset:], entry.Sum)
-			offset += 8
-
-			binary.LittleEndian.PutUint32(entriesBuf[offset:], entry.Count)
-			offset += 4
+	// If there are no blocks, write a dummy entry
+	if blockCount == 1 && len(bw.blockIndex) == 0 {
+		// Create a dummy entry with zeros
+		dummyEntry := FooterEntry{
+			BlockOffset: 0,
+			BlockSize:   0,
+			MinID:       0,
+			MaxID:       0,
+			MinValue:    0,
+			MaxValue:    0,
+			Sum:         0,
+			Count:       0,
 		}
 
-		// Write all entries at once
-		if _, err := bw.writeAndTrack(entriesBuf); err != nil {
-			return fmt.Errorf("failed to write footer entries: %w", err)
+		// Serialize and write the dummy entry
+		entryBuf := dummyEntry.Serialize()
+		if _, err := bw.writeAndTrack(entryBuf); err != nil {
+			return fmt.Errorf("failed to write dummy block index entry: %w", err)
 		}
 	} else {
-		return fmt.Errorf("no block index entries to write")
+		// Write real block index entries
+		for _, entry := range bw.blockIndex {
+			entryBuf := entry.Serialize()
+			if _, err := bw.writeAndTrack(entryBuf); err != nil {
+				return fmt.Errorf("failed to write block index entry: %w", err)
+			}
+		}
 	}
 
-	// Get current position - end of footer content
-	footerEnd := bw.currentPosition
+	// Get current position after writing block index
+	currentPos := bw.currentPosition
 
 	// Calculate footer size
-	footerSize := footerEnd - footerStart
+	footerSize := currentPos - footerStart
 
-	// Create footer metadata and serialize it
+	// Write footer metadata
 	footerMeta := FooterMetadata{
 		FooterSize: uint64(footerSize),
 		Checksum:   uint64(0), // Checksum placeholder
@@ -180,8 +198,7 @@ func (bw *BufferedWriter) finalize() error {
 		return fmt.Errorf("failed to write footer metadata: %w", err)
 	}
 
-	// Go back and update the header with final information
-	// This is one place where we must use Seek since we're moving backward
+	// Jump back to start of file to update header
 	if _, err := bw.file.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("failed to seek to start: %w", err)
 	}
@@ -193,6 +210,8 @@ func (bw *BufferedWriter) finalize() error {
 	header := NewFileHeader(uint64(blockCount), bw.blockSizeTarget, bw.encodingType)
 	header.BitmapOffset = bitmapOffset
 	header.BitmapSize = bitmapSize
+	header.DeletedBitmapOffset = deletedBitmapOffset
+	header.DeletedBitmapSize = deletedBitmapSize
 	header.CreationTime = uint64(time.Now().Unix())
 
 	// Serialize the header with footer offset

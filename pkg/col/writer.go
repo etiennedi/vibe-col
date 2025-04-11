@@ -17,6 +17,7 @@ type Writer struct {
 	blockSizes      []uint32      // Size of each block in bytes
 	blockStats      []BlockStats  // Statistics for each block
 	globalIDs       *sroar.Bitmap // Bitmap of all IDs in the file
+	deletedIDs      *sroar.Bitmap // Bitmap of deleted IDs
 }
 
 // NewWriter creates a new column file writer
@@ -35,6 +36,7 @@ func NewWriter(filename string, options ...WriterOption) (*Writer, error) {
 		blockSizes:      make([]uint32, 0),
 		blockStats:      make([]BlockStats, 0),
 		globalIDs:       sroar.NewBitmap(),
+		deletedIDs:      sroar.NewBitmap(),
 	}
 
 	// Apply options
@@ -49,4 +51,16 @@ func NewWriter(filename string, options ...WriterOption) (*Writer, error) {
 	}
 
 	return writer, nil
+}
+
+// AddDeletedID adds a deleted ID to the writer
+func (w *Writer) AddDeletedID(id uint64) {
+	w.deletedIDs.Set(id)
+}
+
+// BatchAddDeletedIDs adds multiple deleted IDs to the writer
+func (w *Writer) BatchAddDeletedIDs(ids []uint64) {
+	for _, id := range ids {
+		w.deletedIDs.Set(id)
+	}
 }
