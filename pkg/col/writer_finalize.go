@@ -199,6 +199,7 @@ func (w *Writer) updateHeader(bitmapOffset, bitmapSize, deletedBitmapOffset, del
 	header.DeletedBitmapOffset = deletedBitmapOffset
 	header.DeletedBitmapSize = deletedBitmapSize
 	header.CreationTime = uint64(time.Now().Unix())
+	header.Level = w.level // Preserve the level field from the writer
 
 	// Serialize the header with footer offset
 	headerBuf := header.SerializeWithFooterOffset(uint64(footerStart))

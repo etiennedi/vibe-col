@@ -58,6 +58,9 @@ func (bw *BufferedWriter) writeHeader() error {
 	// Create the header with default values
 	header := NewFileHeader(0, bw.blockSizeTarget, bw.encodingType)
 
+	// Set the level from the writer
+	header.Level = bw.level
+
 	// Serialize the header
 	headerBuf := header.Serialize()
 
@@ -213,6 +216,7 @@ func (bw *BufferedWriter) finalize() error {
 	header.DeletedBitmapOffset = deletedBitmapOffset
 	header.DeletedBitmapSize = deletedBitmapSize
 	header.CreationTime = uint64(time.Now().Unix())
+	header.Level = bw.level // Preserve the level field from the writer
 
 	// Serialize the header with footer offset
 	headerBuf := header.SerializeWithFooterOffset(uint64(footerStart))

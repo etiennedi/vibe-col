@@ -12,6 +12,7 @@ import (
 type CompactionOptions struct {
 	TargetBlockSize int    // Target block size in number of entries (0 means use default)
 	EncodingType    uint32 // Encoding type to use for the output file (0 means use default)
+	Level           uint16 // Compaction level (0 is base level)
 }
 
 // DefaultCompactionOptions returns the default compaction options
@@ -19,6 +20,7 @@ func DefaultCompactionOptions() CompactionOptions {
 	return CompactionOptions{
 		TargetBlockSize: 0, // Use the default block size from BufferedWriter (128KB)
 		EncodingType:    0, // Use default encoding
+		Level:           0, // Default level is 0 (base level)
 	}
 }
 
@@ -32,6 +34,7 @@ type Reader interface {
 type WriterOptions struct {
 	EncodingOptions EncodingOptions
 	TargetBlockSize int
+	Level           uint16 // Compaction level (0 is base level)
 }
 
 // EncodingOptions contains configuration for encoding
@@ -40,13 +43,16 @@ type EncodingOptions struct {
 }
 
 // NewWriter creates a new column writer
-func NewWriter(file *os.File, opts EncodingOptions, targetBlockSize int) (*col.BufferedWriter, error) {
+func NewWriter(file *os.File, opts EncodingOptions, targetBlockSize int, level uint16) (*col.BufferedWriter, error) {
 	writerOptions := []col.BufferedWriterOption{}
 	if opts.Type != 0 {
 		writerOptions = append(writerOptions, col.WithBufferedEncoding(opts.Type))
 	}
 	if targetBlockSize > 0 {
 		writerOptions = append(writerOptions, col.WithBufferedBlockSize(uint32(targetBlockSize)))
+	}
+	if level > 0 {
+		writerOptions = append(writerOptions, col.WithBufferedLevel(level))
 	}
 
 	return col.NewBufferedWriter(file.Name(), writerOptions...)
@@ -70,6 +76,8 @@ func Compact(left, right *col.Reader, outputPath string, options CompactionOptio
 	if options.TargetBlockSize > 0 {
 		writerOpts = append(writerOpts, col.WithBufferedBlockSize(uint32(options.TargetBlockSize)))
 	}
+	// Add the level option
+	writerOpts = append(writerOpts, col.WithBufferedLevel(options.Level))
 
 	// Create our writer with the specified encoding options and target block size
 	writer, err := col.NewBufferedWriter(outputPath, writerOpts...)

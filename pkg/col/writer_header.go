@@ -16,6 +16,9 @@ func (w *Writer) writeHeader() error {
 	// Create the header with default values
 	header := NewFileHeader(0, w.blockSizeTarget, w.encodingType)
 
+	// Set the level from the writer
+	header.Level = w.level
+
 	// Serialize the header
 	headerBuf := header.Serialize()
 

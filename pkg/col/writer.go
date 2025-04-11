@@ -13,6 +13,7 @@ type Writer struct {
 	blockCount      uint64
 	encodingType    uint32
 	blockSizeTarget uint32
+	level           uint16        // Compaction level (0 is base level)
 	blockPositions  []uint64      // Position of each block in the file
 	blockSizes      []uint32      // Size of each block in bytes
 	blockStats      []BlockStats  // Statistics for each block
@@ -32,6 +33,7 @@ func NewWriter(filename string, options ...WriterOption) (*Writer, error) {
 		blockCount:      0,
 		encodingType:    EncodingRaw, // Default
 		blockSizeTarget: defaultBlockSize,
+		level:           0, // Default level is 0 (base level)
 		blockPositions:  make([]uint64, 0),
 		blockSizes:      make([]uint32, 0),
 		blockStats:      make([]BlockStats, 0),
@@ -69,4 +71,9 @@ func (w *Writer) BatchAddDeletedIDs(ids []uint64) {
 	for _, id := range ids {
 		w.deletedIDs.Set(id)
 	}
+}
+
+// Level returns the current compaction level
+func (w *Writer) Level() uint16 {
+	return w.level
 }

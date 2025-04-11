@@ -25,6 +25,13 @@ func WithBufferedBlockSize(blockSize uint32) BufferedWriterOption {
 	}
 }
 
+// WithBufferedLevel sets the compaction level for the BufferedWriter
+func WithBufferedLevel(level uint16) BufferedWriterOption {
+	return func(bw *BufferedWriter) {
+		bw.level = level
+	}
+}
+
 // BufferedWriter implements a writer for column files that buffers data in memory
 // using BlockData structures and writes directly to disk.
 type BufferedWriter struct {
@@ -33,6 +40,7 @@ type BufferedWriter struct {
 	blockCount      uint64
 	encodingType    uint32
 	blockSizeTarget uint32
+	level           uint16        // Compaction level (0 is base level)
 	blockIndex      []FooterEntry // Detailed index of blocks
 	globalIDs       *sroar.Bitmap
 	deletedIDs      *sroar.Bitmap
@@ -60,6 +68,7 @@ func NewBufferedWriter(filename string, options ...BufferedWriterOption) (*Buffe
 		blockCount:      0,
 		encodingType:    EncodingRaw, // Default
 		blockSizeTarget: defaultBlockSize,
+		level:           0, // Default level is 0 (base level)
 		blockIndex:      make([]FooterEntry, 0),
 		globalIDs:       sroar.NewBitmap(),
 		deletedIDs:      sroar.NewBitmap(),
@@ -406,4 +415,9 @@ func (bw *BufferedWriter) BatchAddDeletedIDs(ids []uint64) {
 func (bw *BufferedWriter) AddDeletedIDBitmap(bitmap *sroar.Bitmap) {
 	// Merge the provided bitmap with our deleted IDs bitmap
 	bw.deletedIDs = bw.deletedIDs.Or(bitmap)
+}
+
+// Level returns the current compaction level
+func (bw *BufferedWriter) Level() uint16 {
+	return bw.level
 }

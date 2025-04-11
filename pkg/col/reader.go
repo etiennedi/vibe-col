@@ -318,3 +318,8 @@ func (r *Reader) GetDeletedIDBitmap() (*sroar.Bitmap, error) {
 
 	return bitmap, nil
 }
+
+// Level returns the compaction level of the file
+func (r *Reader) Level() uint16 {
+	return r.header.Level
+}

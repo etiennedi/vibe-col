@@ -45,6 +45,7 @@ type FileHeader struct {
 	BitmapSize          uint64 // Size of the global ID bitmap in bytes
 	DeletedBitmapOffset uint64 // Offset to the deleted IDs bitmap
 	DeletedBitmapSize   uint64 // Size of the deleted IDs bitmap in bytes
+	Level               uint16 // Compaction level (0 is base level)
 	FooterOffset        uint64 // Offset to the start of the footer
 	// Reserved space - fills up to 96 bytes
 }
@@ -86,12 +87,16 @@ func (h *FileHeader) Serialize() []byte {
 	binary.LittleEndian.PutUint64(buf[offset:], h.BitmapSize)
 	offset += 8
 
-	// Write new fields for deleted IDs bitmap
+	// Write fields for deleted IDs bitmap
 	binary.LittleEndian.PutUint64(buf[offset:], h.DeletedBitmapOffset)
 	offset += 8
 
 	binary.LittleEndian.PutUint64(buf[offset:], h.DeletedBitmapSize)
 	offset += 8
+
+	// Write new Level field
+	binary.LittleEndian.PutUint16(buf[offset:], h.Level)
+	offset += 2
 
 	// The rest of the buffer is already zeroed by make(), which serves as the reserved space
 
@@ -170,6 +175,12 @@ func (h *FileHeader) Deserialize(buf []byte) error {
 	// Read deleted bitmap size
 	h.DeletedBitmapSize = binary.LittleEndian.Uint64(buf[offset:])
 	offset += 8
+
+	// Read level if enough bytes are available
+	if offset+2 <= len(buf) {
+		h.Level = binary.LittleEndian.Uint16(buf[offset:])
+		offset += 2
+	}
 
 	// Try to read footer offset if available
 	if len(buf) >= headerSize+8 {
@@ -503,6 +514,7 @@ func NewFileHeader(blockCount uint64, blockSizeTarget uint32, encodingType uint3
 		BitmapSize:          0, // Will be updated when writing the bitmap
 		DeletedBitmapOffset: 0, // Will be updated when writing the deleted IDs bitmap
 		DeletedBitmapSize:   0, // Will be updated when writing the deleted IDs bitmap
+		Level:               0, // Default level is 0 (base level)
 		FooterOffset:        0, // Will be updated when writing the footer
 	}
 }

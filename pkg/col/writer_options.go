@@ -16,3 +16,10 @@ func WithBlockSize(blockSize uint32) WriterOption {
 		w.blockSizeTarget = blockSize
 	}
 }
+
+// WithLevel sets the compaction level for the Writer
+func WithLevel(level uint16) WriterOption {
+	return func(w *Writer) {
+		w.level = level
+	}
+}
