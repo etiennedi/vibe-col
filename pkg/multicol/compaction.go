@@ -68,6 +68,29 @@ func Compact(left, right *col.Reader, outputPath string, options CompactionOptio
 	}
 	defer outputFile.Close()
 
+	// Determine the target level based on the levels of the input segments
+	leftLevel := left.Level()
+	rightLevel := right.Level()
+
+	var targetLevel uint16
+	if leftLevel == rightLevel {
+		// If both segments have the same level, increase by 1
+		targetLevel = leftLevel + 1
+	} else {
+		// Otherwise, use the higher of the two levels
+		if leftLevel > rightLevel {
+			targetLevel = leftLevel
+		} else {
+			targetLevel = rightLevel
+		}
+	}
+
+	// Use the level provided in options only if it was explicitly set and is greater than
+	// the calculated target level (to allow for manually specifying higher levels)
+	if options.Level > 0 && options.Level > targetLevel {
+		targetLevel = options.Level
+	}
+
 	// Create writer options
 	writerOpts := []col.BufferedWriterOption{}
 	if options.EncodingType != 0 {
@@ -76,8 +99,8 @@ func Compact(left, right *col.Reader, outputPath string, options CompactionOptio
 	if options.TargetBlockSize > 0 {
 		writerOpts = append(writerOpts, col.WithBufferedBlockSize(uint32(options.TargetBlockSize)))
 	}
-	// Add the level option
-	writerOpts = append(writerOpts, col.WithBufferedLevel(options.Level))
+	// Add the calculated level
+	writerOpts = append(writerOpts, col.WithBufferedLevel(targetLevel))
 
 	// Create our writer with the specified encoding options and target block size
 	writer, err := col.NewBufferedWriter(outputPath, writerOpts...)

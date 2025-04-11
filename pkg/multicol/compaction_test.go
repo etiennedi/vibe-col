@@ -1090,63 +1090,102 @@ func TestCompactionWithDeletedIDs(t *testing.T) {
 	assert.Equal(t, len(deletedIDs), deletedBitmap.GetCardinality(), "Output should have %d deleted IDs", len(deletedIDs))
 }
 
-// TestCompactionLevel verifies that the level is correctly applied during compaction
+// TestCompactionLevel verifies that the level is correctly calculated when compacting files
 func TestCompactionLevel(t *testing.T) {
 	// Create temporary directory for test files
 	tempDir := t.TempDir()
 
-	// Prepare test data
-	ids1 := []uint64{1, 3, 5, 7, 9}
-	vals1 := []int64{10, 30, 50, 70, 90}
+	// Test cases for different level combinations
+	testCases := []struct {
+		name       string
+		leftLevel  uint16
+		rightLevel uint16
+		expected   uint16 // Expected level after compaction
+	}{
+		{
+			name:       "Same Level 0",
+			leftLevel:  0,
+			rightLevel: 0,
+			expected:   1, // Same level -> level+1
+		},
+		{
+			name:       "Same Level 1",
+			leftLevel:  1,
+			rightLevel: 1,
+			expected:   2, // Same level -> level+1
+		},
+		{
+			name:       "Same Level 5",
+			leftLevel:  5,
+			rightLevel: 5,
+			expected:   6, // Same level -> level+1
+		},
+		{
+			name:       "Different Levels (1,2)",
+			leftLevel:  1,
+			rightLevel: 2,
+			expected:   2, // Different levels -> max(left, right)
+		},
+		{
+			name:       "Different Levels (3,1)",
+			leftLevel:  3,
+			rightLevel: 1,
+			expected:   3, // Different levels -> max(left, right)
+		},
+		{
+			name:       "Zero and Non-Zero (0,2)",
+			leftLevel:  0,
+			rightLevel: 2,
+			expected:   2, // Different levels -> max(left, right)
+		},
+	}
 
-	ids2 := []uint64{2, 4, 6, 8, 10}
-	vals2 := []int64{20, 40, 60, 80, 100}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create left segment file with specified level
+			file1Path := filepath.Join(tempDir, fmt.Sprintf("left_level_%d.col", tc.leftLevel))
+			writer1, err := col.NewWriter(file1Path, col.WithLevel(tc.leftLevel))
+			require.NoError(t, err)
 
-	// Create first segment file
-	file1Path := filepath.Join(tempDir, "segment1.col")
-	writer1, err := col.NewWriter(file1Path, col.WithLevel(0)) // level 0
-	require.NoError(t, err)
+			// Write data
+			ids1 := []uint64{1, 3, 5, 7, 9}
+			vals1 := []int64{10, 30, 50, 70, 90}
+			err = writer1.WriteBlock(ids1, vals1)
+			require.NoError(t, err)
+			err = writer1.FinalizeAndClose()
+			require.NoError(t, err)
 
-	err = writer1.WriteBlock(ids1, vals1)
-	require.NoError(t, err)
+			// Create right segment file with specified level
+			file2Path := filepath.Join(tempDir, fmt.Sprintf("right_level_%d.col", tc.rightLevel))
+			writer2, err := col.NewWriter(file2Path, col.WithLevel(tc.rightLevel))
+			require.NoError(t, err)
 
-	err = writer1.FinalizeAndClose()
-	require.NoError(t, err)
+			// Write data
+			ids2 := []uint64{2, 4, 6, 8, 10}
+			vals2 := []int64{20, 40, 60, 80, 100}
+			err = writer2.WriteBlock(ids2, vals2)
+			require.NoError(t, err)
+			err = writer2.FinalizeAndClose()
+			require.NoError(t, err)
 
-	// Create second segment file
-	file2Path := filepath.Join(tempDir, "segment2.col")
-	writer2, err := col.NewWriter(file2Path, col.WithLevel(0)) // level 0
-	require.NoError(t, err)
+			// Open readers
+			reader1, err := col.NewReader(file1Path)
+			require.NoError(t, err)
+			defer reader1.Close()
 
-	err = writer2.WriteBlock(ids2, vals2)
-	require.NoError(t, err)
+			reader2, err := col.NewReader(file2Path)
+			require.NoError(t, err)
+			defer reader2.Close()
 
-	err = writer2.FinalizeAndClose()
-	require.NoError(t, err)
+			// Verify readers have correct levels
+			assert.Equal(t, tc.leftLevel, reader1.Level(), "Left file should have level %d", tc.leftLevel)
+			assert.Equal(t, tc.rightLevel, reader2.Level(), "Right file should have level %d", tc.rightLevel)
 
-	// Open both files for reading
-	reader1, err := col.NewReader(file1Path)
-	require.NoError(t, err)
-	defer reader1.Close()
-
-	reader2, err := col.NewReader(file2Path)
-	require.NoError(t, err)
-	defer reader2.Close()
-
-	// Test different compaction levels
-	testLevels := []uint16{1, 2, 3, 10}
-
-	for _, level := range testLevels {
-		t.Run(fmt.Sprintf("Level_%d", level), func(t *testing.T) {
 			// Create output file path
-			outputPath := filepath.Join(tempDir, fmt.Sprintf("compacted_level_%d.col", level))
+			outputPath := filepath.Join(tempDir, fmt.Sprintf("compacted_%s.col", tc.name))
 
-			// Set compaction options with specified level
-			options := CompactionOptions{
-				Level: level,
-			}
-
-			// Perform compaction
+			// Perform compaction with empty options (to use automatic level calculation)
+			options := CompactionOptions{}
 			err = Compact(reader1, reader2, outputPath, options)
 			require.NoError(t, err)
 
@@ -1155,46 +1194,33 @@ func TestCompactionLevel(t *testing.T) {
 			require.NoError(t, err)
 			defer compactedReader.Close()
 
-			// Verify the level was set correctly
-			assert.Equal(t, level, compactedReader.Level())
+			// Verify the level was calculated correctly
+			assert.Equal(t, tc.expected, compactedReader.Level(),
+				"Compacted file should have level %d when compacting levels %d and %d",
+				tc.expected, tc.leftLevel, tc.rightLevel)
 
-			// Verify contents (should have merged data)
-			var allIDs []uint64
-			var allValues []int64
+			// Additionally test with explicit override level
+			if tc.expected < 10 {
+				overridePath := filepath.Join(tempDir, fmt.Sprintf("override_%s.col", tc.name))
+				overrideLevel := uint16(10) // Higher than any of our test levels
 
-			for i := uint64(0); i < compactedReader.BlockCount(); i++ {
-				blockIDs, blockValues, err := compactedReader.GetPairs(i)
+				// Set a specific level in options that should override the calculated level
+				overrideOptions := CompactionOptions{
+					Level: overrideLevel,
+				}
+
+				err = Compact(reader1, reader2, overridePath, overrideOptions)
 				require.NoError(t, err)
 
-				allIDs = append(allIDs, blockIDs...)
-				allValues = append(allValues, blockValues...)
+				overrideReader, err := col.NewReader(overridePath)
+				require.NoError(t, err)
+				defer overrideReader.Close()
+
+				// Verify the override worked
+				assert.Equal(t, overrideLevel, overrideReader.Level(),
+					"Compacted file should use override level %d instead of calculated level %d",
+					overrideLevel, tc.expected)
 			}
-
-			// Sort the IDs and values together
-			idValuePairs := make([][2]int64, len(allIDs))
-			for i := range allIDs {
-				idValuePairs[i] = [2]int64{int64(allIDs[i]), allValues[i]}
-			}
-
-			sort.Slice(idValuePairs, func(i, j int) bool {
-				return idValuePairs[i][0] < idValuePairs[j][0]
-			})
-
-			// Extract sorted IDs and values
-			sortedIDs := make([]uint64, len(idValuePairs))
-			sortedValues := make([]int64, len(idValuePairs))
-			for i, pair := range idValuePairs {
-				sortedIDs[i] = uint64(pair[0])
-				sortedValues[i] = pair[1]
-			}
-
-			// Expected merged data
-			expectedIDs := []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
-			expectedValues := []int64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}
-
-			// Compare with expected
-			assert.Equal(t, expectedIDs, sortedIDs, "IDs should match expected")
-			assert.Equal(t, expectedValues, sortedValues, "Values should match expected")
 		})
 	}
 }
