@@ -166,11 +166,9 @@ func (m *MemtableImpl) BatchAdd(ids []uint64, values []int64) error {
 
 // Delete marks an entry as deleted
 func (m *MemtableImpl) Delete(id uint64) bool {
-	// Check if the entry exists first
-	_, exists := m.data.Load(id)
-	if !exists {
-		return false
-	}
+	// In a MultiReader context, we might want to delete entries that
+	// exist in older segments but not in this memtable. So we don't
+	// check existence first and always mark the ID as deleted.
 
 	// If WAL is enabled, log the delete operation
 	if m.walEnabled && m.wal != nil {
@@ -183,7 +181,7 @@ func (m *MemtableImpl) Delete(id uint64) bool {
 	// Store the ID in the deleted map
 	m.deleted.Store(id, true)
 
-	// Remove from the data map
+	// Remove from the data map if it exists
 	m.data.Delete(id)
 	m.delCount.Add(1)
 	return true
@@ -191,38 +189,29 @@ func (m *MemtableImpl) Delete(id uint64) bool {
 
 // BatchDelete marks multiple entries as deleted
 func (m *MemtableImpl) BatchDelete(ids []uint64) int {
-	// For batch operations, we first collect which IDs actually exist
-	var existingIds []uint64
-	for _, id := range ids {
-		if _, exists := m.data.Load(id); exists {
-			existingIds = append(existingIds, id)
-		}
-	}
-
-	// If none exist, return early
-	if len(existingIds) == 0 {
-		return 0
-	}
+	// In a MultiReader context, we might want to delete entries that
+	// exist in older segments but not in this memtable. So we don't
+	// check existence and always mark all IDs as deleted.
 
 	// If WAL is enabled, log the batch delete operation
 	if m.walEnabled && m.wal != nil {
-		if err := m.wal.LogBatchDelete(existingIds); err != nil {
+		if err := m.wal.LogBatchDelete(ids); err != nil {
 			// Log the error but continue with the operation
 			fmt.Printf("failed to log batch delete operation: %v\n", err)
 		}
 	}
 
-	// Apply the deletes
-	for _, id := range existingIds {
+	// Mark all IDs as deleted
+	for _, id := range ids {
 		// Store the ID in the deleted map
 		m.deleted.Store(id, true)
 
-		// Remove from the data map
+		// Remove from the data map if it exists
 		m.data.Delete(id)
 	}
 
-	m.delCount.Add(int64(len(existingIds)))
-	return len(existingIds)
+	m.delCount.Add(int64(len(ids)))
+	return len(ids)
 }
 
 // Get returns the value for a specific ID
@@ -439,6 +428,13 @@ func (m *MemtableImpl) Flush(path string) (uint64, error) {
 		}
 		writeCount++
 	}
+
+	// Add deleted IDs to the writer
+	m.deleted.Range(func(key, _ interface{}) bool {
+		id := key.(uint64)
+		writer.AddDeletedID(id)
+		return true
+	})
 
 	return writeCount, nil
 }

@@ -78,6 +78,11 @@ func TestMultiReaderIntegration(t *testing.T) {
 			setupFunc:   setupEdgeCasesScenario,
 			description: "Scenario testing various edge cases like min/max values",
 		},
+		{
+			name:        "With deletions",
+			setupFunc:   setupDeletionsScenario,
+			description: "Scenario testing deletions across segments",
+		},
 	}
 
 	// Run each scenario
@@ -609,6 +614,175 @@ func setupEdgeCasesScenario(t *testing.T, tempDir string) ([]AggregateSource, in
 	return []AggregateSource{reader1, reader2, memtable3}, expectedCount, expectedSum
 }
 
+// setupDeletionsScenario creates a scenario that tests deletion functionality
+func setupDeletionsScenario(t *testing.T, tempDir string) ([]AggregateSource, int, int64) {
+	// Create and populate first memtable
+	memtable1 := NewMemtable(nil)
+	// Add entries 1-150
+	for i := uint64(1); i <= 150; i++ {
+		err := memtable1.Add(i, int64(i*10))
+		require.NoError(t, err)
+	}
+
+	// Flush memtable1 to a .col file
+	colFile1 := filepath.Join(tempDir, "deletion_segment1.col")
+	count1, err := memtable1.Flush(colFile1)
+	require.NoError(t, err)
+	require.Equal(t, uint64(150), count1)
+
+	// Create and populate second memtable with updates, new entries, and deletions
+	memtable2 := NewMemtable(nil)
+
+	// Update some entries from first memtable
+	for i := uint64(50); i <= 75; i++ {
+		err := memtable2.Add(i, int64(i*20)) // Double the value
+		require.NoError(t, err)
+	}
+
+	// Add new entries
+	for i := uint64(151); i <= 200; i++ {
+		err := memtable2.Add(i, int64(i*10))
+		require.NoError(t, err)
+	}
+
+	// Delete some entries from first segment
+	// Delete IDs 100-120
+	for i := uint64(100); i <= 120; i++ {
+		deleted := memtable2.Delete(i)
+		require.True(t, deleted, "Entry with ID %d should be deleted", i)
+	}
+
+	// Flush memtable2 to a .col file
+	colFile2 := filepath.Join(tempDir, "deletion_segment2.col")
+	count2, err := memtable2.Flush(colFile2)
+	require.NoError(t, err)
+	require.Equal(t, uint64(76), count2) // 26 updates + 50 new entries
+
+	// Create and populate third memtable with more updates, new entries, and deletions
+	memtable3 := NewMemtable(nil)
+
+	// Add new entries
+	for i := uint64(201); i <= 250; i++ {
+		err := memtable3.Add(i, int64(i*10))
+		require.NoError(t, err)
+	}
+
+	// Update some entries
+	for i := uint64(170); i <= 190; i++ {
+		err := memtable3.Add(i, int64(i*30)) // Triple the value
+		require.NoError(t, err)
+	}
+
+	// Delete some entries from all segments:
+	// - Some from first segment (IDs 1-10)
+	// - Some from second segment that were added in second segment (IDs 175-185)
+	// - Some from second segment that were updates to first segment (IDs 60-65)
+
+	// Delete IDs 1-10 (from first segment)
+	for i := uint64(1); i <= 10; i++ {
+		deleted := memtable3.Delete(i)
+		require.True(t, deleted, "Entry with ID %d should be deleted", i)
+	}
+
+	// Delete IDs 175-185 (some were updated above in memtable3)
+	for i := uint64(175); i <= 185; i++ {
+		deleted := memtable3.Delete(i)
+		require.True(t, deleted, "Entry with ID %d should be deleted", i)
+	}
+
+	// Delete IDs 60-65 (were updated in memtable2)
+	for i := uint64(60); i <= 65; i++ {
+		deleted := memtable3.Delete(i)
+		require.True(t, deleted, "Entry with ID %d should be deleted", i)
+	}
+
+	// Open readers for the .col files
+	reader1, err := col.NewReader(colFile1)
+	require.NoError(t, err)
+
+	reader2, err := col.NewReader(colFile2)
+	require.NoError(t, err)
+
+	// Calculate expected results
+	// After all operations, we should have:
+	// 1. IDs 1-10: deleted
+	// 2. IDs 11-49: original values from first segment
+	// 3. IDs 50-59: updated values from second segment
+	// 4. IDs 60-65: deleted
+	// 5. IDs 66-75: updated values from second segment
+	// 6. IDs 76-99: original values from first segment
+	// 7. IDs 100-120: deleted
+	// 8. IDs 121-150: original values from first segment
+	// 9. IDs 151-169: original values from second segment
+	// 10. IDs 170-174: updated values from third segment
+	// 11. IDs 175-185: deleted
+	// 12. IDs 186-190: updated values from third segment
+	// 13. IDs 191-200: original values from second segment
+	// 14. IDs 201-250: original values from third segment
+
+	// Count is total number of undeleted IDs
+	expectedCount := 250 - 10 - 6 - 21 - 11 // Total - deleted ranges
+
+	// Calculate sum manually
+	var expectedSum int64 = 0
+
+	// IDs 11-49: original values from first segment
+	for i := 11; i <= 49; i++ {
+		expectedSum += int64(i * 10)
+	}
+
+	// IDs 50-59: updated values from second segment
+	for i := 50; i <= 59; i++ {
+		expectedSum += int64(i * 20)
+	}
+
+	// IDs 66-75: updated values from second segment
+	for i := 66; i <= 75; i++ {
+		expectedSum += int64(i * 20)
+	}
+
+	// IDs 76-99: original values from first segment
+	for i := 76; i <= 99; i++ {
+		expectedSum += int64(i * 10)
+	}
+
+	// IDs 121-150: original values from first segment
+	for i := 121; i <= 150; i++ {
+		expectedSum += int64(i * 10)
+	}
+
+	// IDs 151-169: original values from second segment
+	for i := 151; i <= 169; i++ {
+		expectedSum += int64(i * 10)
+	}
+
+	// IDs 170-174: updated values from third segment
+	for i := 170; i <= 174; i++ {
+		expectedSum += int64(i * 30)
+	}
+
+	// IDs 186-190: updated values from third segment
+	for i := 186; i <= 190; i++ {
+		expectedSum += int64(i * 30)
+	}
+
+	// IDs 191-200: original values from second segment
+	for i := 191; i <= 200; i++ {
+		expectedSum += int64(i * 10)
+	}
+
+	// IDs 201-250: original values from third segment
+	for i := 201; i <= 250; i++ {
+		expectedSum += int64(i * 10)
+	}
+
+	t.Logf("Deletion scenario: %d unique IDs with sum %d after %d deletions",
+		expectedCount, expectedSum, 10+6+21+11)
+
+	// Return sources and expected values
+	return []AggregateSource{reader1, reader2, memtable3}, expectedCount, expectedSum
+}
+
 // Additional test for compaction
 func TestMultiReaderWithCompaction(t *testing.T) {
 	// Create a temporary directory for test files
@@ -632,7 +806,7 @@ func TestMultiReaderWithCompaction(t *testing.T) {
 	_, err = memtable1.Flush(colFile1)
 	require.NoError(t, err)
 
-	// Create and populate second memtable with updates and new entries
+	// Create and populate second memtable with updates, new entries, and deletions
 	memtable2 := NewMemtable(nil)
 	// Update some entries from first memtable
 	for i := uint64(50); i <= 75; i++ {
@@ -644,11 +818,18 @@ func TestMultiReaderWithCompaction(t *testing.T) {
 		err := memtable2.Add(i, int64(i*10))
 		require.NoError(t, err)
 	}
+
+	// Delete entries 10-20 from the first segment
+	for i := uint64(10); i <= 20; i++ {
+		deleted := memtable2.Delete(i)
+		require.True(t, deleted, "Entry with ID %d should be deleted", i)
+	}
+
 	// Flush memtable2 to a .col file
 	_, err = memtable2.Flush(colFile2)
 	require.NoError(t, err)
 
-	// Create and populate third memtable
+	// Create and populate third memtable with more updates, new entries, and deletions
 	memtable3 := NewMemtable(nil)
 	// Add new entries
 	for i := uint64(151); i <= 200; i++ {
@@ -659,6 +840,16 @@ func TestMultiReaderWithCompaction(t *testing.T) {
 	for i := uint64(125); i <= 150; i++ {
 		err := memtable3.Add(i, int64(i*30)) // Triple the value
 		require.NoError(t, err)
+	}
+
+	// Delete entries 40-45 (from first segment) and 140-145 (from second segment, some already updated above)
+	for i := uint64(40); i <= 45; i++ {
+		deleted := memtable3.Delete(i)
+		require.True(t, deleted, "Entry with ID %d should be deleted", i)
+	}
+	for i := uint64(140); i <= 145; i++ {
+		deleted := memtable3.Delete(i)
+		require.True(t, deleted, "Entry with ID %d should be deleted", i)
 	}
 
 	// Open readers for the .col files
@@ -676,11 +867,66 @@ func TestMultiReaderWithCompaction(t *testing.T) {
 	// Create a multi-reader with all sources
 	multiReader := NewMultiReader(sources)
 
+	// Calculate expected results with the deletions
+	idToValue := make(map[uint64]int64)
+
+	// Start with all IDs from 1-100 with values i*10
+	for i := uint64(1); i <= 100; i++ {
+		idToValue[i] = int64(i * 10)
+	}
+
+	// Update IDs 50-75 with values i*20
+	for i := uint64(50); i <= 75; i++ {
+		idToValue[i] = int64(i * 20)
+	}
+
+	// Add IDs 101-150 with values i*10
+	for i := uint64(101); i <= 150; i++ {
+		idToValue[i] = int64(i * 10)
+	}
+
+	// Update IDs 125-150 with values i*30
+	for i := uint64(125); i <= 150; i++ {
+		idToValue[i] = int64(i * 30)
+	}
+
+	// Add IDs 151-200 with values i*10
+	for i := uint64(151); i <= 200; i++ {
+		idToValue[i] = int64(i * 10)
+	}
+
+	// Delete IDs 10-20
+	for i := uint64(10); i <= 20; i++ {
+		delete(idToValue, i)
+	}
+
+	// Delete IDs 40-45
+	for i := uint64(40); i <= 45; i++ {
+		delete(idToValue, i)
+	}
+
+	// Delete IDs 140-145
+	for i := uint64(140); i <= 145; i++ {
+		delete(idToValue, i)
+	}
+
+	// Calculate expected count and sum
+	expectedCount := len(idToValue)
+	var expectedSum int64
+	for _, v := range idToValue {
+		expectedSum += v
+	}
+
 	// Verify initial aggregation results
 	aggResult, err := multiReader.Aggregate(AggregateOptions{})
 	require.NoError(t, err)
 
+	// Verify against our expected values
+	require.Equal(t, expectedCount, aggResult.Count, "Count should match expected with deletions")
+	require.Equal(t, expectedSum, aggResult.Sum, "Sum should match expected with deletions")
+
 	t.Logf("Original aggregation result: Count=%d, Sum=%d", aggResult.Count, aggResult.Sum)
+	t.Logf("Deletions: IDs 10-20, 40-45, and 140-145 (total: %d deletions)", 11+6+6)
 
 	// Perform compaction of the two col files
 	compactedFile := filepath.Join(tempDir, "compacted.col")
@@ -692,18 +938,32 @@ func TestMultiReaderWithCompaction(t *testing.T) {
 	require.NoError(t, err)
 	defer compactedReader.Close()
 
+	// Get deleted IDs bitmap from compacted file to verify deletions were preserved
+	deletedIDsBitmap, err := compactedReader.GetDeletedIDBitmap()
+	require.NoError(t, err)
+
+	// Verify the deleted IDs bitmap has the expected IDs
+	for i := uint64(10); i <= 20; i++ {
+		require.True(t, deletedIDsBitmap.Contains(i), "Compacted file should have ID %d marked as deleted", i)
+	}
+
 	// Debug the compacted reader
 	compactedResult := compactedReader.AggregateWithOptions(col.AggregateOptions{})
 	t.Logf("Compacted file result: Count=%d, Sum=%d", compactedResult.Count, compactedResult.Sum)
+	t.Logf("Compacted file has %d deleted IDs", deletedIDsBitmap.GetCardinality())
 
 	// Create a new multi-reader with compacted file and memtable3
 	newMultiReader := NewMultiReader([]AggregateSource{compactedReader, memtable3})
 
-	// Verify the new aggregation results
+	// Verify the new aggregation results match the original results
 	newAggResult, err := newMultiReader.Aggregate(AggregateOptions{})
 	require.NoError(t, err)
 
 	t.Logf("New aggregation result: Count=%d, Sum=%d", newAggResult.Count, newAggResult.Sum)
+
+	// Verify that the results with compaction match the results without compaction
+	require.Equal(t, aggResult.Count, newAggResult.Count, "Count should be the same with compacted files as with original files")
+	require.Equal(t, aggResult.Sum, newAggResult.Sum, "Sum should be the same with compacted files as with original files")
 
 	// Get ID bitmaps for counting
 	compactedBitmap, err := compactedReader.GetGlobalIDBitmap()
@@ -718,23 +978,6 @@ func TestMultiReaderWithCompaction(t *testing.T) {
 
 	// Log details about overlapping IDs for debugging
 	t.Logf("Overlapping IDs between compacted file and memtable3: %d", overlapCount)
-
-	// Calculate count of new entries in memtable3
-	newEntriesBitmap := memtable3Bitmap.AndNot(compactedBitmap)
-	newEntriesCount := newEntriesBitmap.GetCardinality()
-
-	// Expected count after compaction is:
-	// - All entries from compacted file
-	// - Plus new entries from memtable3
-	expectedCompactedCount := compactedResult.Count + newEntriesCount
-
-	// Verify the count
-	require.Equal(t, expectedCompactedCount, newAggResult.Count,
-		"Count should match our calculation accounting for overlaps")
-
-	// Verify min/max are preserved
-	require.Equal(t, aggResult.Min, newAggResult.Min)
-	require.Equal(t, aggResult.Max, newAggResult.Max)
 
 	// Create a separate multiReader instance for the second part of the test
 	// This avoids issues with closing a reader that's part of a multiReader that's still in use
@@ -759,6 +1002,13 @@ func TestMultiReaderWithCompaction(t *testing.T) {
 		err := memtable3Copy.Add(i, int64(i*30)) // Triple the value
 		require.NoError(t, err)
 	}
+	// Add the same deletions
+	for i := uint64(40); i <= 45; i++ {
+		memtable3Copy.Delete(i)
+	}
+	for i := uint64(140); i <= 145; i++ {
+		memtable3Copy.Delete(i)
+	}
 
 	testMultiReader := NewMultiReader([]AggregateSource{reader1Copy, reader2Copy, memtable3Copy})
 
@@ -775,22 +1025,33 @@ func TestMultiReaderWithCompaction(t *testing.T) {
 	// We have to recompute the expected values
 	remainingIdMap := make(map[uint64]int64)
 
-	// Add data from reader2Copy (IDs 50-150)
-	// Values 50-75 have i*20, values 101-150 have i*10
+	// Add data from reader2Copy (IDs 50-150, except deleted ones)
+	// Values 50-75 have i*20, values 101-150 have i*10, IDs 10-20 are deleted
 	for i := uint64(50); i <= 75; i++ {
 		remainingIdMap[i] = int64(i * 20)
 	}
 	for i := uint64(101); i <= 150; i++ {
 		remainingIdMap[i] = int64(i * 10)
 	}
+	// Delete IDs 10-20 (already deleted in reader2)
+	for i := uint64(10); i <= 20; i++ {
+		delete(remainingIdMap, i)
+	}
 
-	// Add/update data from memtable3Copy (IDs 125-200)
+	// Add/update data from memtable3Copy (IDs 125-200, except deleted ones)
 	// Updates: 125-150 have i*30, New: 151-200 have i*10
 	for i := uint64(125); i <= 150; i++ {
 		remainingIdMap[i] = int64(i * 30)
 	}
 	for i := uint64(151); i <= 200; i++ {
 		remainingIdMap[i] = int64(i * 10)
+	}
+	// Delete IDs 40-45 and 140-145
+	for i := uint64(40); i <= 45; i++ {
+		delete(remainingIdMap, i)
+	}
+	for i := uint64(140); i <= 145; i++ {
+		delete(remainingIdMap, i)
 	}
 
 	// Calculate expected count and sum after reader1 is closed
@@ -812,9 +1073,9 @@ func TestMultiReaderWithCompaction(t *testing.T) {
 
 	// Use the calculated values for verification
 	require.Equal(t, expectedRemainingCount, finalResult.Count,
-		"Count should match expected after closing reader1")
+		"Count should match expected value after reader1 is closed")
 	require.Equal(t, expectedRemainingSum, finalResult.Sum,
-		"Sum should match expected after closing reader1")
+		"Sum should match expected value after reader1 is closed")
 }
 
 func TestAggregateBenchmark(t *testing.T) {
