@@ -1571,3 +1571,355 @@ func TestMultilevelCompaction(t *testing.T) {
 		}
 	}
 }
+
+// TestMultiReaderWithFiltering tests that the MultiReader correctly handles
+// arbitrary user-provided filters across different data sources.
+func TestMultiReaderWithFiltering(t *testing.T) {
+	// Create a temporary directory for test files
+	tempDir, err := os.MkdirTemp("", "multi-reader-filtering-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	// Define file paths
+	colFile1 := filepath.Join(tempDir, "segment1.col")
+	colFile2 := filepath.Join(tempDir, "segment2.col")
+	compactedFile := filepath.Join(tempDir, "compacted.col")
+
+	// Setup test data - similar to TestMultiReaderWithCompaction but simpler
+	// Create first segment (older data)
+	memtable1 := NewMemtable(nil)
+	// Add entries 1-100
+	for i := uint64(1); i <= 100; i++ {
+		err := memtable1.Add(i, int64(i*10))
+		require.NoError(t, err)
+	}
+	_, err = memtable1.Flush(colFile1)
+	require.NoError(t, err)
+
+	// Create second segment (newer data with updates and deletions)
+	memtable2 := NewMemtable(nil)
+	// Update some entries
+	for i := uint64(25); i <= 50; i++ {
+		err := memtable2.Add(i, int64(i*20)) // Double the value
+		require.NoError(t, err)
+	}
+	// Add new entries
+	for i := uint64(101); i <= 150; i++ {
+		err := memtable2.Add(i, int64(i*10))
+		require.NoError(t, err)
+	}
+	// Delete some entries
+	for i := uint64(75); i <= 85; i++ {
+		deleted := memtable2.Delete(i)
+		require.True(t, deleted)
+	}
+	_, err = memtable2.Flush(colFile2)
+	require.NoError(t, err)
+
+	// Create in-memory memtable (newest data with more updates and deletions)
+	memtable3 := NewMemtable(nil)
+	// Add new entries
+	for i := uint64(151); i <= 200; i++ {
+		err := memtable3.Add(i, int64(i*10))
+		require.NoError(t, err)
+	}
+	// Update some entries
+	for i := uint64(125); i <= 145; i++ {
+		err := memtable3.Add(i, int64(i*30)) // Triple the value
+		require.NoError(t, err)
+	}
+	// Delete some entries
+	for i := uint64(40); i <= 45; i++ {
+		deleted := memtable3.Delete(i)
+		require.True(t, deleted)
+	}
+
+	// Open readers for the flushed files
+	reader1, err := col.NewReader(colFile1)
+	require.NoError(t, err)
+	defer reader1.Close()
+
+	reader2, err := col.NewReader(colFile2)
+	require.NoError(t, err)
+	defer reader2.Close()
+
+	// Create a source array and MultiReader
+	sources := []AggregateSource{reader1, reader2, memtable3}
+	multiReader := NewMultiReader(sources)
+
+	// For expected value calculation, build a map of ID to final value
+	idToValue := make(map[uint64]int64)
+
+	// Start with all IDs 1-100 from segment 1
+	for i := uint64(1); i <= 100; i++ {
+		idToValue[i] = int64(i * 10)
+	}
+
+	// Apply updates from segment 2
+	for i := uint64(25); i <= 50; i++ {
+		idToValue[i] = int64(i * 20)
+	}
+
+	// Add new IDs 101-150 from segment 2
+	for i := uint64(101); i <= 150; i++ {
+		idToValue[i] = int64(i * 10)
+	}
+
+	// Apply deletions from segment 2
+	for i := uint64(75); i <= 85; i++ {
+		delete(idToValue, i)
+	}
+
+	// Apply updates from memtable 3
+	for i := uint64(125); i <= 145; i++ {
+		idToValue[i] = int64(i * 30)
+	}
+
+	// Add new IDs 151-200 from memtable 3
+	for i := uint64(151); i <= 200; i++ {
+		idToValue[i] = int64(i * 10)
+	}
+
+	// Apply deletions from memtable 3
+	for i := uint64(40); i <= 45; i++ {
+		delete(idToValue, i)
+	}
+
+	// First, verify unfiltered results
+	t.Run("Unfiltered Aggregation", func(t *testing.T) {
+		result, err := multiReader.Aggregate(AggregateOptions{})
+		require.NoError(t, err)
+
+		// Calculate expected values
+		expectedCount := len(idToValue)
+		var expectedSum int64
+		for _, v := range idToValue {
+			expectedSum += v
+		}
+
+		require.Equal(t, expectedCount, result.Count, "Unfiltered count should match expected value")
+		require.Equal(t, expectedSum, result.Sum, "Unfiltered sum should match expected value")
+	})
+
+	// Test 1: Filter from newer memtable (memtable3)
+	t.Run("Filter Newest Memtable IDs", func(t *testing.T) {
+		// Create filter for IDs 150-160
+		filter := sroar.NewBitmap()
+		for i := uint64(150); i <= 160; i++ {
+			filter.Set(i)
+		}
+
+		result, err := multiReader.Aggregate(AggregateOptions{
+			Filter: filter,
+		})
+		require.NoError(t, err)
+
+		// Calculate expected values (IDs 150-160 that exist in idToValue)
+		expectedCount := 0
+		var expectedSum int64
+		for i := uint64(150); i <= 160; i++ {
+			if val, exists := idToValue[i]; exists {
+				expectedCount++
+				expectedSum += val
+			}
+		}
+
+		require.Equal(t, expectedCount, result.Count, "Filtered count should match expected value")
+		require.Equal(t, expectedSum, result.Sum, "Filtered sum should match expected value")
+	})
+
+	// Test 2: Filter from middle segment (segment2)
+	t.Run("Filter Middle Segment IDs", func(t *testing.T) {
+		// Create filter for IDs 100-110
+		filter := sroar.NewBitmap()
+		for i := uint64(100); i <= 110; i++ {
+			filter.Set(i)
+		}
+
+		result, err := multiReader.Aggregate(AggregateOptions{
+			Filter: filter,
+		})
+		require.NoError(t, err)
+
+		// Calculate expected values (IDs 100-110 that exist in idToValue)
+		expectedCount := 0
+		var expectedSum int64
+		for i := uint64(100); i <= 110; i++ {
+			if val, exists := idToValue[i]; exists {
+				expectedCount++
+				expectedSum += val
+			}
+		}
+
+		require.Equal(t, expectedCount, result.Count, "Filtered count should match expected value")
+		require.Equal(t, expectedSum, result.Sum, "Filtered sum should match expected value")
+	})
+
+	// Test 3: Filter from oldest segment (segment1)
+	t.Run("Filter Oldest Segment IDs", func(t *testing.T) {
+		// Create filter for IDs 1-20
+		filter := sroar.NewBitmap()
+		for i := uint64(1); i <= 20; i++ {
+			filter.Set(i)
+		}
+
+		result, err := multiReader.Aggregate(AggregateOptions{
+			Filter: filter,
+		})
+		require.NoError(t, err)
+
+		// Calculate expected values (IDs 1-20 that exist in idToValue)
+		expectedCount := 0
+		var expectedSum int64
+		for i := uint64(1); i <= 20; i++ {
+			if val, exists := idToValue[i]; exists {
+				expectedCount++
+				expectedSum += val
+			}
+		}
+
+		require.Equal(t, expectedCount, result.Count, "Filtered count should match expected value")
+		require.Equal(t, expectedSum, result.Sum, "Filtered sum should match expected value")
+	})
+
+	// Test 4: Filter IDs that span multiple segments
+	t.Run("Filter IDs Across Segments", func(t *testing.T) {
+		// Create filter for IDs 30-140
+		filter := sroar.NewBitmap()
+		for i := uint64(30); i <= 140; i++ {
+			filter.Set(i)
+		}
+
+		result, err := multiReader.Aggregate(AggregateOptions{
+			Filter: filter,
+		})
+		require.NoError(t, err)
+
+		// Calculate expected values (IDs 30-140 that exist in idToValue)
+		expectedCount := 0
+		var expectedSum int64
+		for i := uint64(30); i <= 140; i++ {
+			if val, exists := idToValue[i]; exists {
+				expectedCount++
+				expectedSum += val
+			}
+		}
+
+		require.Equal(t, expectedCount, result.Count, "Filtered count should match expected value")
+		require.Equal(t, expectedSum, result.Sum, "Filtered sum should match expected value")
+	})
+
+	// Test 5: Filter includes deleted IDs
+	t.Run("Filter Including Deleted IDs", func(t *testing.T) {
+		// Create filter for IDs 70-90 (includes deleted IDs 75-85)
+		filter := sroar.NewBitmap()
+		for i := uint64(70); i <= 90; i++ {
+			filter.Set(i)
+		}
+
+		result, err := multiReader.Aggregate(AggregateOptions{
+			Filter: filter,
+		})
+		require.NoError(t, err)
+
+		// Calculate expected values (IDs 70-90 that exist in idToValue)
+		expectedCount := 0
+		var expectedSum int64
+		for i := uint64(70); i <= 90; i++ {
+			if val, exists := idToValue[i]; exists {
+				expectedCount++
+				expectedSum += val
+			}
+		}
+
+		// Expect IDs 70-74 and 86-90 only (15 IDs total)
+		require.Equal(t, expectedCount, result.Count, "Filtered count should match expected value")
+		require.Equal(t, expectedSum, result.Sum, "Filtered sum should match expected value")
+	})
+
+	// Test 6: Filter completely outside data range
+	t.Run("Filter Outside Data Range", func(t *testing.T) {
+		// Create filter for IDs 1000-1010 (no data in this range)
+		filter := sroar.NewBitmap()
+		for i := uint64(1000); i <= 1010; i++ {
+			filter.Set(i)
+		}
+
+		result, err := multiReader.Aggregate(AggregateOptions{
+			Filter: filter,
+		})
+		require.NoError(t, err)
+
+		// Expect empty result
+		require.Equal(t, 0, result.Count, "Filtered count should be 0")
+		require.Equal(t, int64(0), result.Sum, "Filtered sum should be 0")
+	})
+
+	// Now compact the first two segments and test filtering with the compacted segment
+	err = Compact(reader1, reader2, compactedFile, DefaultCompactionOptions())
+	require.NoError(t, err)
+
+	compactedReader, err := col.NewReader(compactedFile)
+	require.NoError(t, err)
+	defer compactedReader.Close()
+
+	// Create a new multi-reader with the compacted source
+	compactedMultiReader := NewMultiReader([]AggregateSource{compactedReader, memtable3})
+
+	// Test 7: Same filter tests with compacted segment
+	t.Run("Filter With Compacted Segment", func(t *testing.T) {
+		// Create filter for IDs 30-140
+		filter := sroar.NewBitmap()
+		for i := uint64(30); i <= 140; i++ {
+			filter.Set(i)
+		}
+
+		// Test with original multi-reader
+		originalResult, err := multiReader.Aggregate(AggregateOptions{
+			Filter: filter,
+		})
+		require.NoError(t, err)
+
+		// Test with compacted multi-reader
+		compactedResult, err := compactedMultiReader.Aggregate(AggregateOptions{
+			Filter: filter,
+		})
+		require.NoError(t, err)
+
+		// Results should be identical
+		require.Equal(t, originalResult.Count, compactedResult.Count,
+			"Compacted count should match original count")
+		require.Equal(t, originalResult.Sum, compactedResult.Sum,
+			"Compacted sum should match original sum")
+	})
+
+	// Test 8: Filter that includes IDs from the deleted bitmap in compacted segment
+	t.Run("Filter With Deleted IDs In Compacted Segment", func(t *testing.T) {
+		// Create filter for IDs 70-90 (includes deleted IDs 75-85)
+		filter := sroar.NewBitmap()
+		for i := uint64(70); i <= 90; i++ {
+			filter.Set(i)
+		}
+
+		// Get results from compacted multi-reader
+		compactedResult, err := compactedMultiReader.Aggregate(AggregateOptions{
+			Filter: filter,
+		})
+		require.NoError(t, err)
+
+		// Calculate expected values (IDs 70-90 that exist in idToValue)
+		expectedCount := 0
+		var expectedSum int64
+		for i := uint64(70); i <= 90; i++ {
+			if val, exists := idToValue[i]; exists {
+				expectedCount++
+				expectedSum += val
+			}
+		}
+
+		require.Equal(t, expectedCount, compactedResult.Count,
+			"Compacted filtered count should match expected value")
+		require.Equal(t, expectedSum, compactedResult.Sum,
+			"Compacted filtered sum should match expected value")
+	})
+}
