@@ -15,7 +15,7 @@ import (
 	"github.com/weaviate/sroar"
 )
 
-// VibeStoreOptions defines configuration for the LSM store
+// VibeStoreOptions defines the configuration options for the LSM store
 type VibeStoreOptions struct {
 	// Directory for segment files
 	DataDir string
@@ -30,6 +30,8 @@ type VibeStoreOptions struct {
 
 	// Background tasks
 	MaxSegmentsBeforeCompaction int
+	CompactionCheckIntervalMs   int64 // How often to check for compaction (in milliseconds)
+	DisableCompaction           bool  // Completely disable compaction (for testing)
 }
 
 // DefaultOptions returns the default store options
@@ -40,7 +42,9 @@ func DefaultOptions(dataDir string) VibeStoreOptions {
 		MemtableMaxAgeMs:            60000, // Flush after 60 seconds
 		MemtableOptions:             multicol.DefaultMemtableOptions(),
 		CompactionOptions:           multicol.DefaultCompactionOptions(),
-		MaxSegmentsBeforeCompaction: 10, // Trigger compaction at 10 segments
+		MaxSegmentsBeforeCompaction: 10,    // Trigger compaction at 10 segments
+		CompactionCheckIntervalMs:   30000, // Check compaction every 30 seconds
+		DisableCompaction:           false, // Compaction enabled by default
 	}
 }
 
@@ -53,7 +57,7 @@ const (
 	taskCleanup
 )
 
-// task represents a unit of work for the background worker
+// task represents a background task
 type task struct {
 	taskType taskType
 	memtable multicol.Memtable // For flush tasks
@@ -165,6 +169,9 @@ func NewVibeStore(options VibeStoreOptions) (*VibeStore, error) {
 	// Start the memtable age check timer
 	go store.memtableAgeChecker()
 
+	// Start the compaction checker
+	go store.compactionChecker()
+
 	return store, nil
 }
 
@@ -203,13 +210,15 @@ func (vs *VibeStore) processTask(t task) {
 	switch t.taskType {
 	case taskFlush:
 		vs.doFlushMemtable(t.memtable)
+		// Trigger compaction check after flush
+		vs.triggerCompaction()
 	case taskCompaction:
-		// Compaction is a no-op for now
+		vs.doCompaction(t.segments)
+		// Check if more compaction is needed
+		vs.triggerCompaction()
 	case taskCleanup:
 		vs.doCleanup(t.oldState)
 	}
-
-	// For now, we won't automatically trigger compaction
 }
 
 // memtableAgeChecker periodically checks if the active memtable is too old
@@ -583,4 +592,195 @@ func (vs *VibeStore) ForceFlush() {
 
 	// Wait a bit for the flush to complete
 	time.Sleep(100 * time.Millisecond)
+}
+
+// TriggerCompaction manually triggers a compaction cycle
+// This is primarily used for testing
+func (vs *VibeStore) TriggerCompaction() {
+	vs.triggerCompaction()
+}
+
+// findCompactionPair identifies the best pair of segments to compact
+// Returns indices of left and right segments, or -1,-1 if no eligible pair found
+func (vs *VibeStore) findCompactionPair() (int, int) {
+	currentState := vs.state.Load().(*VibeStoreState)
+	segments := currentState.segments
+
+	// Need at least 2 segments to compact
+	if len(segments) < 2 {
+		return -1, -1
+	}
+
+	// Start from the oldest segments (index 0) and move forward
+	for i := 0; i < len(segments)-1; i++ {
+		leftSegment := segments[i]
+		rightSegment := segments[i+1]
+
+		// Check if these segments have the same level
+		if leftSegment.Level() == rightSegment.Level() {
+			return i, i + 1
+		}
+	}
+
+	// No eligible pairs found
+	return -1, -1
+}
+
+// triggerCompaction checks if compaction is needed and schedules it
+func (vs *VibeStore) triggerCompaction() {
+	// If compaction is disabled, do nothing
+	if vs.options.DisableCompaction {
+		return
+	}
+
+	// Find a pair of segments to compact
+	leftIdx, rightIdx := vs.findCompactionPair()
+
+	// If no eligible pair, return without scheduling a task
+	if leftIdx < 0 || rightIdx < 0 {
+		return
+	}
+
+	// Get segments to compact
+	currentState := vs.state.Load().(*VibeStoreState)
+	leftSegment := currentState.segments[leftIdx]
+	rightSegment := currentState.segments[rightIdx]
+
+	// Schedule compaction task
+	vs.taskQueue <- task{
+		taskType: taskCompaction,
+		segments: []*col.Reader{leftSegment, rightSegment},
+	}
+}
+
+// doCompaction performs segment compaction (called by the background worker)
+func (vs *VibeStore) doCompaction(segments []*col.Reader) {
+	if len(segments) != 2 {
+		fmt.Printf("Error: Invalid number of segments for compaction: %d\n", len(segments))
+		return
+	}
+
+	leftSegment := segments[0]
+	rightSegment := segments[1]
+
+	// Create a new segment file path
+	timestamp := time.Now().UnixNano()
+	filename := fmt.Sprintf("compacted_%d.col", timestamp)
+	outputPath := filepath.Join(vs.options.DataDir, filename)
+
+	fmt.Printf("Compacting segments with levels %d and %d to: %s\n",
+		leftSegment.Level(), rightSegment.Level(), outputPath)
+
+	// Perform compaction using the multicol.Compact function
+	// This will automatically calculate the level based on our rules
+	err := multicol.Compact(leftSegment, rightSegment, outputPath, vs.options.CompactionOptions)
+	if err != nil {
+		fmt.Printf("Error compacting segments: %v\n", err)
+		return
+	}
+
+	// Open the new compacted segment
+	newSegment, err := col.NewReader(outputPath)
+	if err != nil {
+		fmt.Printf("Error opening compacted segment: %v\n", err)
+		return
+	}
+
+	// Update state to replace the compacted segments with the new one
+	vs.stateLock.Lock()
+	currentState := vs.state.Load().(*VibeStoreState)
+
+	// Find the positions of the segments in the current state
+	// They might have changed since we first selected them
+	leftPos := -1
+	rightPos := -1
+	for i, segment := range currentState.segments {
+		if segment == leftSegment {
+			leftPos = i
+		} else if segment == rightSegment {
+			rightPos = i
+		}
+	}
+
+	// If segments are not consecutive or not found, abort
+	if leftPos < 0 || rightPos < 0 || rightPos != leftPos+1 {
+		vs.stateLock.Unlock()
+		newSegment.Close()
+		fmt.Printf("Segments are no longer valid for compaction\n")
+		return
+	}
+
+	// Create new segment array with the compacted segment
+	newSegments := make([]*col.Reader, 0, len(currentState.segments)-1)
+	newSegments = append(newSegments, currentState.segments[:leftPos]...)
+	newSegments = append(newSegments, newSegment)
+	newSegments = append(newSegments, currentState.segments[rightPos+1:]...)
+
+	fmt.Printf("Compaction complete. New segment has level %d\n", newSegment.Level())
+
+	// Create new state
+	newState := &VibeStoreState{
+		activeMemtable:    currentState.activeMemtable,
+		activeSince:       currentState.activeSince,
+		flushingMemtables: currentState.flushingMemtables,
+		segments:          newSegments,
+		multiReader:       nil, // Will be created on demand
+	}
+
+	// Store new state and create task to clean up old state
+	oldState := currentState
+	vs.state.Store(newState)
+	vs.stateLock.Unlock()
+
+	// Schedule cleanup of old state
+	vs.taskQueue <- task{
+		taskType: taskCleanup,
+		oldState: oldState,
+	}
+
+	// Close the old segments since they're no longer needed
+	// This is safe because we kept the references in oldState for proper cleanup
+	leftSegment.Close()
+	rightSegment.Close()
+}
+
+// compactionChecker periodically checks if compaction is needed
+func (vs *VibeStore) compactionChecker() {
+	// If compaction is disabled, don't run the checker
+	if vs.options.DisableCompaction {
+		// Just wait for shutdown signal
+		<-vs.shutdown
+		return
+	}
+
+	// Use the configured interval or default to 30 seconds
+	intervalMs := vs.options.CompactionCheckIntervalMs
+	if intervalMs <= 0 {
+		intervalMs = 30000 // Default to 30 seconds
+	}
+
+	ticker := time.NewTicker(time.Duration(intervalMs) * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			vs.triggerCompaction()
+		case <-vs.shutdown:
+			return
+		}
+	}
+}
+
+// GetSegmentLevels returns a list of the current segment levels from oldest to newest
+// This is primarily for debugging and monitoring the compaction process
+func (vs *VibeStore) GetSegmentLevels() []uint16 {
+	currentState := vs.state.Load().(*VibeStoreState)
+
+	levels := make([]uint16, len(currentState.segments))
+	for i, segment := range currentState.segments {
+		levels[i] = segment.Level()
+	}
+
+	return levels
 }

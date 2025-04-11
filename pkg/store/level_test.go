@@ -22,8 +22,10 @@ func TestSegmentLevelOnFlush(t *testing.T) {
 
 	// Create store with small memtable size to trigger flushes easily
 	options := DefaultOptions(tempDir)
-	options.MemtableSize = 10        // Flush after 10 entries
-	options.MemtableMaxAgeMs = 10000 // 10 seconds max age (won't be triggered)
+	options.MemtableSize = 10                   // Flush after 10 entries
+	options.MemtableMaxAgeMs = 10000            // 10 seconds max age (won't be triggered)
+	options.CompactionCheckIntervalMs = 1000000 // Effectively disable compaction during test
+	options.DisableCompaction = true            // Completely disable compaction
 
 	store, err := NewVibeStore(options)
 	require.NoError(t, err)
