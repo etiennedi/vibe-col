@@ -422,3 +422,246 @@ func TestMemtableSortsDataBeforeFlush(t *testing.T) {
 		}
 	}
 }
+
+// TestMemtableUpdateAndDeleteBeforeFlush tests that updates and deletions
+// are correctly handled before and after flushing the memtable
+func TestMemtableUpdateAndDeleteBeforeFlush(t *testing.T) {
+	// Create a temporary directory for test files
+	tempDir, err := os.MkdirTemp("", "memtable-update-delete-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	// ---------------------------------------------------------
+	// SCENARIO 1: Update test
+	// ---------------------------------------------------------
+	t.Run("Update Before Flush", func(t *testing.T) {
+		// Create a new memtable
+		mt := NewMemtable(nil)
+
+		// 1. Create an ID with initial value
+		initialID := uint64(42)
+		initialValue := int64(100)
+		err := mt.Add(initialID, initialValue)
+		require.NoError(t, err)
+
+		// Add some additional entries for context
+		for i := uint64(1); i <= 10; i++ {
+			if i != initialID {
+				err := mt.Add(i, int64(i*10))
+				require.NoError(t, err)
+			}
+		}
+
+		// Verify the initial value was stored correctly
+		val, ok := mt.Get(initialID)
+		require.True(t, ok)
+		require.Equal(t, initialValue, val)
+
+		// 2. Update the ID with a new value
+		updatedValue := int64(200)
+		err = mt.Add(initialID, updatedValue)
+		require.NoError(t, err)
+
+		// Verify the updated value was stored correctly
+		val, ok = mt.Get(initialID)
+		require.True(t, ok)
+		require.Equal(t, updatedValue, val)
+
+		// 3. Perform aggregation on the memtable and verify results
+		result := mt.(AggregateSource).AggregateWithOptions(col.AggregateOptions{})
+		require.Equal(t, 11, result.Count, "Should have 11 entries")
+
+		// Create a specific filter for the updated ID
+		filter := sroar.NewBitmap()
+		filter.Set(initialID)
+
+		filteredResult := mt.(AggregateSource).AggregateWithOptions(col.AggregateOptions{
+			Filter: filter,
+		})
+		require.Equal(t, 1, filteredResult.Count, "Filtered count should be 1")
+		require.Equal(t, updatedValue, filteredResult.Sum, "Sum should be the updated value")
+
+		// 4. Flush the memtable to disk
+		colFile := filepath.Join(tempDir, "update_test.col")
+		written, err := mt.Flush(colFile)
+		require.NoError(t, err)
+		require.Equal(t, uint64(11), written, "Should have written 11 entries")
+
+		// 5. Create a reader and verify it returns the same aggregation results
+		reader, err := col.NewReader(colFile)
+		require.NoError(t, err)
+		defer reader.Close()
+
+		readerResult := reader.AggregateWithOptions(col.AggregateOptions{})
+		require.Equal(t, result.Count, readerResult.Count, "Reader count should match memtable count")
+		require.Equal(t, result.Sum, readerResult.Sum, "Reader sum should match memtable sum")
+
+		readerFilteredResult := reader.AggregateWithOptions(col.AggregateOptions{
+			Filter: filter,
+		})
+		require.Equal(t, filteredResult.Count, readerFilteredResult.Count, "Filtered counts should match")
+		require.Equal(t, filteredResult.Sum, readerFilteredResult.Sum, "Filtered sums should match")
+	})
+
+	// ---------------------------------------------------------
+	// SCENARIO 2: Delete test
+	// ---------------------------------------------------------
+	t.Run("Delete Before Flush", func(t *testing.T) {
+		// Create a new memtable
+		mt := NewMemtable(nil)
+
+		// 1. Add multiple entries
+		totalEntries := 20
+		for i := uint64(1); i <= uint64(totalEntries); i++ {
+			err := mt.Add(i, int64(i*10))
+			require.NoError(t, err)
+		}
+
+		// Verify all entries were added
+		require.Equal(t, int64(totalEntries), mt.ActiveCount(), "Should have added all entries")
+
+		// 2. Delete an ID
+		deletedID := uint64(5)
+		deleted := mt.Delete(deletedID)
+		require.True(t, deleted, "Delete should succeed")
+
+		// Verify the ID was deleted
+		_, exists := mt.Get(deletedID)
+		require.False(t, exists, "Deleted ID should no longer exist")
+
+		// 3. Perform aggregation and verify results
+		result := mt.(AggregateSource).AggregateWithOptions(col.AggregateOptions{})
+		require.Equal(t, totalEntries-1, result.Count, "Count should exclude deleted ID")
+
+		// Calculate expected sum (exclude deleted ID)
+		var expectedSum int64
+		for i := uint64(1); i <= uint64(totalEntries); i++ {
+			if i != deletedID {
+				expectedSum += int64(i * 10)
+			}
+		}
+		require.Equal(t, expectedSum, result.Sum, "Sum should exclude deleted ID")
+
+		// Get the deleted ID bitmap
+		deletedBitmap, err := mt.GetDeletedIDBitmap()
+		require.NoError(t, err)
+		require.True(t, deletedBitmap.Contains(deletedID), "Deleted bitmap should contain the ID")
+		require.Equal(t, int(1), deletedBitmap.GetCardinality(), "Should have exactly one deleted ID")
+
+		// 4. Flush the memtable
+		colFile := filepath.Join(tempDir, "delete_test.col")
+		written, err := mt.Flush(colFile)
+		require.NoError(t, err)
+		require.Equal(t, uint64(totalEntries-1), written, "Should have written all non-deleted entries")
+
+		// 5. Create a reader and verify aggregation results
+		reader, err := col.NewReader(colFile)
+		require.NoError(t, err)
+		defer reader.Close()
+
+		readerResult := reader.AggregateWithOptions(col.AggregateOptions{})
+		require.Equal(t, result.Count, readerResult.Count, "Reader count should match memtable count")
+		require.Equal(t, result.Sum, readerResult.Sum, "Reader sum should match memtable sum")
+
+		// 6. Verify the reader's deleted ID bitmap
+		readerDeletedBitmap, err := reader.GetDeletedIDBitmap()
+		require.NoError(t, err)
+		require.True(t, readerDeletedBitmap.Contains(deletedID), "Reader's deleted bitmap should contain the ID")
+		require.Equal(t, int(1), readerDeletedBitmap.GetCardinality(), "Reader should have exactly one deleted ID")
+	})
+
+	// ---------------------------------------------------------
+	// SCENARIO 3: Delete + Re-add test
+	// ---------------------------------------------------------
+	t.Run("Delete Then Re-add Before Flush", func(t *testing.T) {
+		// Create a new memtable
+		mt := NewMemtable(nil)
+
+		// 1. Add multiple entries
+		totalEntries := 20
+		for i := uint64(1); i <= uint64(totalEntries); i++ {
+			err := mt.Add(i, int64(i*10))
+			require.NoError(t, err)
+		}
+
+		// 2. Delete an ID
+		readdedID := uint64(7)
+		deleted := mt.Delete(readdedID)
+		require.True(t, deleted, "Delete should succeed")
+
+		// Verify the ID was deleted
+		_, exists := mt.Get(readdedID)
+		require.False(t, exists, "Deleted ID should no longer exist")
+
+		// 3. Perform aggregation and verify results
+		resultAfterDelete := mt.(AggregateSource).AggregateWithOptions(col.AggregateOptions{})
+		require.Equal(t, totalEntries-1, resultAfterDelete.Count, "Count should exclude deleted ID")
+
+		// Calculate expected sum (exclude deleted ID)
+		var expectedSumAfterDelete int64
+		for i := uint64(1); i <= uint64(totalEntries); i++ {
+			if i != readdedID {
+				expectedSumAfterDelete += int64(i * 10)
+			}
+		}
+		require.Equal(t, expectedSumAfterDelete, resultAfterDelete.Sum, "Sum should exclude deleted ID")
+
+		// Get the deleted ID bitmap after deletion
+		deletedBitmapAfterDelete, err := mt.GetDeletedIDBitmap()
+		require.NoError(t, err)
+		require.True(t, deletedBitmapAfterDelete.Contains(readdedID), "Deleted bitmap should contain the ID")
+
+		// 4. Re-add the same ID with a different value
+		newValue := int64(777) // Distinct value to easily identify
+		err = mt.Add(readdedID, newValue)
+		require.NoError(t, err)
+
+		// Verify the ID was re-added with the new value
+		val, exists := mt.Get(readdedID)
+		require.True(t, exists, "Re-added ID should exist")
+		require.Equal(t, newValue, val, "Re-added ID should have the new value")
+
+		// 5. Perform aggregation after re-adding and verify results
+		resultAfterReadd := mt.(AggregateSource).AggregateWithOptions(col.AggregateOptions{})
+		require.Equal(t, totalEntries, resultAfterReadd.Count, "Count should include re-added ID")
+
+		// Calculate expected sum (include re-added ID with new value)
+		expectedSumAfterReadd := expectedSumAfterDelete + newValue
+		require.Equal(t, expectedSumAfterReadd, resultAfterReadd.Sum, "Sum should include re-added ID with new value")
+
+		// Get the deleted ID bitmap after re-adding
+		deletedBitmapAfterReadd, err := mt.GetDeletedIDBitmap()
+		require.NoError(t, err)
+		require.False(t, deletedBitmapAfterReadd.Contains(readdedID), "Deleted bitmap should NOT contain the re-added ID")
+
+		// 6. Flush the memtable
+		colFile := filepath.Join(tempDir, "delete_readd_test.col")
+		written, err := mt.Flush(colFile)
+		require.NoError(t, err)
+		require.Equal(t, uint64(totalEntries), written, "Should have written all entries including re-added one")
+
+		// 7. Create a reader and verify aggregation results
+		reader, err := col.NewReader(colFile)
+		require.NoError(t, err)
+		defer reader.Close()
+
+		readerResult := reader.AggregateWithOptions(col.AggregateOptions{})
+		require.Equal(t, resultAfterReadd.Count, readerResult.Count, "Reader count should match memtable count after re-add")
+		require.Equal(t, resultAfterReadd.Sum, readerResult.Sum, "Reader sum should match memtable sum after re-add")
+
+		// Create a filter for the re-added ID to verify its value
+		readdFilter := sroar.NewBitmap()
+		readdFilter.Set(readdedID)
+
+		readdFilteredResult := reader.AggregateWithOptions(col.AggregateOptions{
+			Filter: readdFilter,
+		})
+		require.Equal(t, 1, readdFilteredResult.Count, "Should have exactly one entry for the re-added ID")
+		require.Equal(t, newValue, readdFilteredResult.Sum, "Sum should be the new value of the re-added ID")
+
+		// 8. Verify the reader's deleted ID bitmap doesn't contain the re-added ID
+		readerDeletedBitmap, err := reader.GetDeletedIDBitmap()
+		require.NoError(t, err)
+		require.False(t, readerDeletedBitmap.Contains(readdedID), "Reader's deleted bitmap should NOT contain the re-added ID")
+	})
+}

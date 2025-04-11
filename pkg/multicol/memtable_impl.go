@@ -137,6 +137,9 @@ func (m *MemtableImpl) Add(id uint64, value int64) error {
 		}
 	}
 
+	// Remove the ID from the deleted map if it exists
+	m.deleted.Delete(id)
+
 	// Add to in-memory map
 	m.data.Store(id, value)
 	m.addCount.Add(1)
@@ -157,6 +160,10 @@ func (m *MemtableImpl) BatchAdd(ids []uint64, values []int64) error {
 	}
 
 	for i := 0; i < len(ids); i++ {
+		// Remove the ID from the deleted map if it exists
+		m.deleted.Delete(ids[i])
+
+		// Add to in-memory map
 		m.data.Store(ids[i], values[i])
 	}
 
