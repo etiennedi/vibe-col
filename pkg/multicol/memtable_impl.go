@@ -402,8 +402,8 @@ func (m *MemtableImpl) IsEmpty() bool {
 // Flush writes the non-deleted contents to the specified path
 // Returns the number of entries written and any error
 func (m *MemtableImpl) Flush(path string) (uint64, error) {
-	// Create a BufferedWriter with default options
-	writer, err := col.NewBufferedWriter(path)
+	// Create a BufferedWriter with default options and explicitly set level=0
+	writer, err := col.NewBufferedWriter(path, col.WithBufferedLevel(0))
 	if err != nil {
 		return 0, err
 	}

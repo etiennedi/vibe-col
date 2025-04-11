@@ -546,6 +546,8 @@ func (vs *VibeStore) Close() error {
 	// Flush active memtable if not empty
 	currentState := vs.state.Load().(*VibeStoreState)
 	if !currentState.activeMemtable.IsEmpty() {
+		// This is handling the direct flush rather than using the task queue
+		// So we need to manually ensure the level is set to 0
 		memtable := currentState.activeMemtable
 		timestamp := time.Now().UnixNano()
 		segmentPath := filepath.Join(vs.options.DataDir, fmt.Sprintf("segment_%d.col", timestamp))
