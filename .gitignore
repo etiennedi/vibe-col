@@ -1,6 +1,6 @@
 # Binaries
 vibe-lsm
-loadtest
+/loadtest
 *.test
 col.test
 
@@ -18,3 +18,6 @@ col.test
 /profile_test.col
 /test_parallel.col
 /large_profile_test.col
+
+# Test Data
+/data/

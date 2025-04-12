@@ -79,6 +79,12 @@ type VibeStoreState struct {
 	multiReaderLock sync.RWMutex
 }
 
+// GetSegments returns a slice of the current segment readers in the state.
+// This is primarily for debugging or internal use where direct access is needed.
+func (state *VibeStoreState) GetSegments() []*col.Reader {
+	return state.segments
+}
+
 // getMultiReader returns the cached MultiReader for the current state
 // or creates a new one if needed
 func (state *VibeStoreState) getMultiReader() *multicol.MultiReader {
@@ -990,6 +996,13 @@ func (vs *VibeStore) GetSegmentLevels() []uint16 {
 // IsCompacting returns true if a compaction task is currently believed to be running or scheduled.
 func (vs *VibeStore) IsCompacting() bool {
 	return vs.isCompacting.Load()
+}
+
+// GetStateForDebug returns the current internal state pointer.
+// WARNING: Use only for debugging purposes. Modifying the state
+// directly can lead to corruption.
+func (vs *VibeStore) GetStateForDebug() *VibeStoreState {
+	return vs.state.Load().(*VibeStoreState)
 }
 
 // SegmentManifest represents the persisted state of the store
