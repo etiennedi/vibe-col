@@ -61,10 +61,10 @@ type AggregateOptions struct {
 	Filter *sroar.Bitmap
 }
 
-// Aggregate aggregates data across all readers, handling updates correctly.
+// AggregateWithOptions aggregates data across all readers, handling updates correctly.
 // It processes readers from newest to oldest, using global ID bitmaps as deny lists
 // to exclude updated values from older files.
-func (mr *MultiReader) Aggregate(opts AggregateOptions) (col.AggregateResult, error) {
+func (mr *MultiReader) AggregateWithOptions(opts col.AggregateOptions) (col.AggregateResult, error) {
 	if len(mr.readers) == 0 {
 		return col.AggregateResult{}, nil
 	}
@@ -72,21 +72,31 @@ func (mr *MultiReader) Aggregate(opts AggregateOptions) (col.AggregateResult, er
 	// Initialize the result with zero values
 	result := col.AggregateResult{}
 
-	// Initialize an empty deny bitmap to track processed IDs from newer sources
-	denyBitmap := sroar.NewBitmap()
+	// Initialize a deny bitmap from the options, or create a new one if nil
+	denyBitmap := opts.DenyFilter
+	if denyBitmap == nil {
+		denyBitmap = sroar.NewBitmap()
+	} else {
+		denyBitmap = denyBitmap.Clone() // Clone to avoid modifying the original passed in opts
+	}
 
 	// Process readers from newest (end of slice) to oldest (start of slice)
 	for i := len(mr.readers) - 1; i >= 0; i-- {
 		reader := mr.readers[i]
 
 		// Create aggregation options for this reader, passing the current denyBitmap
+		// and other relevant options directly from the input opts.
 		readerOpts := col.AggregateOptions{
 			SkipPreCalculated: opts.SkipPreCalculated,
-			Filter:            opts.Filter,
-			DenyFilter:        denyBitmap.Clone(), // Pass a clone to avoid modification by the reader
+			Filter:            opts.Filter,        // Pass through original filter
+			DenyFilter:        denyBitmap.Clone(), // Pass a clone of the *accumulated* deny list
+			IDRangeStart:      opts.IDRangeStart,  // Pass through range filters
+			IDRangeEnd:        opts.IDRangeEnd,
+			Parallel:          opts.Parallel, // Pass through parallel setting
 		}
 
-		// Aggregate this reader with the current deny filter
+		// Aggregate this reader with the current deny filter and other options
+		// Note: The reader itself is responsible for handling parallelism internally.
 		readerResult := reader.AggregateWithOptions(readerOpts)
 
 		// Get the global ID bitmap for *this* reader (IDs present in this reader)

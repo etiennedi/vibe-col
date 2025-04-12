@@ -7,7 +7,7 @@ import (
 	"github.com/weaviate/sroar"
 )
 
-// AggregateOptions contains options for the aggregation process
+// AggregateOptions contains options for the aggregation process within a single reader
 type AggregateOptions struct {
 	// SkipPreCalculated forces the aggregation to read all values from blocks
 	// instead of using pre-calculated values from the footer
@@ -16,15 +16,22 @@ type AggregateOptions struct {
 	// Filter is a bitmap of allowed IDs for filtered aggregation
 	Filter *sroar.Bitmap
 
-	// DenyFilter is a bitmap of denied IDs for filtered aggregation
-	// If both Filter and DenyFilter are provided, an ID must be in Filter AND NOT in DenyFilter
+	// DenyFilter is a bitmap of IDs to exclude (used by MultiReader)
 	DenyFilter *sroar.Bitmap
 
-	// Parallel enables parallel aggregation with the specified number of workers
-	// If Parallel is 0, aggregation is performed sequentially
-	// If Parallel is negative, GOMAXPROCS is used as the number of workers
+	// IDRangeStart specifies the inclusive start of the ID range for aggregation
+	IDRangeStart *uint64
+
+	// IDRangeEnd specifies the inclusive end of the ID range for aggregation
+	IDRangeEnd *uint64
+
+	// Parallel indicates the desired number of parallel workers for aggregation within the reader
+	// 0 or 1 means sequential processing.
+	// Negative value means use GOMAXPROCS.
 	Parallel int
 }
+
+// AggregateResult holds the results of an aggregation query
 
 // DefaultAggregateOptions returns the default options for aggregation
 func DefaultAggregateOptions() AggregateOptions {

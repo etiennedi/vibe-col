@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
+	"path/filepath" // Added for GOMAXPROCS
 	"sync"
 	"sync/atomic"
 	"time"
@@ -368,51 +368,36 @@ func (vs *VibeStore) Aggregate(opts col.AggregateOptions) (col.AggregateResult, 
 	multiReader := currentState.getMultiReader()
 
 	// Perform the aggregation with all options
-	return multiReader.Aggregate(multicol.AggregateOptions{
-		SkipPreCalculated: opts.SkipPreCalculated,
-		Filter:            opts.Filter,
-	})
+	// Note: We pass col.AggregateOptions directly now.
+	return multiReader.AggregateWithOptions(opts)
 }
 
-// AggregateWithOptions performs aggregation with additional options
-// for advanced use cases
+// AggregateWithOptions performs aggregation over the entire store, respecting updates and deletes.
+// It merges results from the active memtable, flushing memtables, and segments.
 func (vs *VibeStore) AggregateWithOptions(opts AggregateOptions) (col.AggregateResult, error) {
-	vs.stateLock.RLock()
-	currentState := vs.state.Load().(*VibeStoreState)
-	currentState.readerCount.Add(1)
-	vs.stateLock.RUnlock()
+	currentState := vs.acquireReadState()   // Get a stable state snapshot
+	defer vs.releaseReadState(currentState) // Release the state when done
 
-	defer currentState.readerCount.Add(-1)
-
-	// Get the cached MultiReader for the current state
 	multiReader := currentState.getMultiReader()
 
-	// Before performing aggregation, apply parallel option if specified
-	// This needs to be done for each source in the MultiReader
-	if opts.Parallel != 0 {
-		// For now, we don't directly apply parallel settings to segments
-		// This is a placeholder for future enhancement when we implement
-		// segment-level parallelism by configuring each reader individually
-
-		// The actual parallel processing is handled internally by the col.Reader
-		// when the proper options are passed
-	}
-
-	// Map our options to multicol options and include DenyFilter
-	multicolOpts := multicol.AggregateOptions{
+	// Construct col.AggregateOptions from store.AggregateOptions
+	colOpts := col.AggregateOptions{
 		SkipPreCalculated: opts.SkipPreCalculated,
 		Filter:            opts.Filter,
+		IDRangeStart:      &opts.IDRangeStart,
+		IDRangeEnd:        &opts.IDRangeEnd,
+		Parallel:          opts.Parallel,
+		// DenyFilter is handled internally by MultiReader
 	}
 
-	// Perform the aggregation with all options
-	result, err := multiReader.Aggregate(multicolOpts)
+	// The MultiReader is responsible for handling aggregation across sources,
+	// potentially passing parallelism options down to individual sources.
+	result, err := multiReader.AggregateWithOptions(colOpts)
+	if err != nil {
+		return col.AggregateResult{}, fmt.Errorf("MultiReader aggregation failed: %w", err)
+	}
 
-	// The parallel setting gets applied inside each individual reader,
-	// but the higher-level MultiReader orchestrates across multiple sources
-	// If we want truly parallel processing across all data, we may need to
-	// enhance the MultiReader implementation in the future
-
-	return result, err
+	return result, nil
 }
 
 // AggregateOptions defines the options for aggregation operations
@@ -432,6 +417,12 @@ type AggregateOptions struct {
 	// If Parallel is 0, aggregation is performed sequentially
 	// If Parallel is negative, GOMAXPROCS is used as the number of workers
 	Parallel int
+
+	// IDRangeStart is the start of the ID range for filtered aggregation
+	IDRangeStart uint64
+
+	// IDRangeEnd is the end of the ID range for filtered aggregation
+	IDRangeEnd uint64
 }
 
 // DefaultAggregateOptions returns default options for aggregation
@@ -999,8 +990,8 @@ func (vs *VibeStore) IsCompacting() bool {
 }
 
 // GetStateForDebug returns the current internal state pointer.
-// WARNING: Use only for debugging purposes. Modifying the state
-// directly can lead to corruption.
+// WARNING: Modifying the returned state directly can lead to corruption.
+// This should only be used for debugging purposes.
 func (vs *VibeStore) GetStateForDebug() *VibeStoreState {
 	return vs.state.Load().(*VibeStoreState)
 }
@@ -1111,4 +1102,18 @@ func (vs *VibeStore) loadManifest() error {
 
 	fmt.Printf("Loaded %d segments from manifest\n", len(segments))
 	return nil
+}
+
+// acquireReadState gets the current state and increments its reader count
+func (vs *VibeStore) acquireReadState() *VibeStoreState {
+	vs.stateLock.RLock()
+	currentState := vs.state.Load().(*VibeStoreState)
+	currentState.readerCount.Add(1)
+	vs.stateLock.RUnlock()
+	return currentState
+}
+
+// releaseReadState releases the current state and decrements its reader count
+func (vs *VibeStore) releaseReadState(state *VibeStoreState) {
+	state.readerCount.Add(-1)
 }
