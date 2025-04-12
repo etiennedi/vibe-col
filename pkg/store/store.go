@@ -132,8 +132,11 @@ type VibeStore struct {
 	stateLock sync.RWMutex
 
 	// Background task coordination
-	taskQueue chan task
-	shutdown  chan struct{}
+	taskQueue    chan task
+	shutdown     chan struct{}
+	workerWG     sync.WaitGroup // Wait group for background workers
+	compactionWG sync.WaitGroup // Wait group for ongoing compactions
+	isCompacting atomic.Bool    // Flag to prevent concurrent compactions
 
 	// Configuration
 	options VibeStoreOptions
@@ -149,9 +152,10 @@ func NewVibeStore(options VibeStoreOptions) (*VibeStore, error) {
 
 	// Create a new store
 	store := &VibeStore{
-		options:   options,
-		taskQueue: make(chan task, 100), // Buffer for task queueing
-		shutdown:  make(chan struct{}),
+		options:      options,
+		taskQueue:    make(chan task, 100), // Buffer for task queueing
+		shutdown:     make(chan struct{}),
+		isCompacting: atomic.Bool{},
 	}
 
 	// Create initial memtable
@@ -176,14 +180,13 @@ func NewVibeStore(options VibeStoreOptions) (*VibeStore, error) {
 		return nil, fmt.Errorf("failed to load manifest: %w", err)
 	}
 
-	// Start the background worker
+	// Start background tasks
 	go store.backgroundWorker()
-
-	// Start the memtable age check timer
 	go store.memtableAgeChecker()
-
-	// Start the compaction checker
 	go store.compactionChecker()
+
+	// Add background workers to WaitGroup
+	store.workerWG.Add(3) // Add 1 for each background goroutine
 
 	return store, nil
 }
@@ -208,6 +211,7 @@ func ensureDirectoryExists(dir string) error {
 
 // backgroundWorker processes tasks from the task queue
 func (vs *VibeStore) backgroundWorker() {
+	defer vs.workerWG.Done() // Ensure Done is called when goroutine exits
 	for {
 		select {
 		case task := <-vs.taskQueue:
@@ -224,9 +228,13 @@ func (vs *VibeStore) processTask(t task) {
 	case taskFlush:
 		vs.doFlushMemtable(t.memtable)
 	case taskCompaction:
+		// Ensure the compaction flag is reset regardless of outcome
+		defer func() {
+			vs.isCompacting.Store(false)
+			// Check if more compaction is needed *after* resetting the flag
+			_ = vs.triggerCompaction(false)
+		}()
 		vs.doCompaction(t.segments)
-		// Check if more compaction is needed
-		_ = vs.triggerCompaction(false)
 	case taskCleanup:
 		vs.doCleanup(t.oldState)
 	}
@@ -234,6 +242,7 @@ func (vs *VibeStore) processTask(t task) {
 
 // memtableAgeChecker periodically checks if the active memtable is too old
 func (vs *VibeStore) memtableAgeChecker() {
+	defer vs.workerWG.Done() // Ensure Done is called when goroutine exits
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -623,6 +632,11 @@ func (vs *VibeStore) Close() error {
 	// Signal shutdown to background workers
 	close(vs.shutdown)
 
+	// NOTE: Removed WaitGroup wait as shutdown logic needs rethinking.
+	// fmt.Println("Close: Signalled shutdown, waiting for workers...")
+	// vs.workerWG.Wait()
+	// fmt.Println("Close: Workers finished. Proceeding with final flush and close.")
+
 	// Flush active memtable if not empty
 	currentState := vs.state.Load().(*VibeStoreState)
 	if !currentState.activeMemtable.IsEmpty() {
@@ -740,9 +754,24 @@ func (vs *VibeStore) triggerCompaction(isManual bool) bool {
 	// If compaction is disabled and this is NOT a manual request, do nothing
 	if vs.options.DisableCompaction && !isManual {
 		// Only log when we're blocking an automatic compaction
-		fmt.Printf("Automatic compaction is disabled via options.DisableCompaction\n")
+		// fmt.Printf("Automatic compaction is disabled via options.DisableCompaction\n")
 		return false
 	}
+
+	// Check if a compaction is already running or scheduled
+	if !vs.isCompacting.CompareAndSwap(false, true) {
+		// fmt.Printf("Skipping compaction trigger: already compacting\n")
+		return false // Already compacting or another trigger is in progress
+	}
+
+	// --- Compaction lock acquired --- //
+	// Defer unsetting the flag ONLY if we fail to find/queue a pair
+	failToQueue := true
+	defer func() {
+		if failToQueue {
+			vs.isCompacting.Store(false)
+		}
+	}()
 
 	// Find a pair of segments to compact
 	leftIdx, rightIdx := vs.findCompactionPair()
@@ -750,18 +779,18 @@ func (vs *VibeStore) triggerCompaction(isManual bool) bool {
 	// If no eligible pair, return without scheduling a task
 	if leftIdx < 0 || rightIdx < 0 {
 		fmt.Printf("No eligible segment pairs found for compaction\n")
-		currentState := vs.state.Load().(*VibeStoreState)
-		if len(currentState.segments) >= 2 {
-			fmt.Printf("Have %d segments but none with matching levels\n", len(currentState.segments))
-			for i, segment := range currentState.segments {
-				fmt.Printf("Segment %d has level %d\n", i, segment.Level())
-			}
-		}
+		// We didn't queue, so unset the flag via defer
 		return false
 	}
 
 	// Get segments to compact
 	currentState := vs.state.Load().(*VibeStoreState)
+	// Check if segments still exist (could have been compacted away)
+	if leftIdx >= len(currentState.segments) || rightIdx >= len(currentState.segments) {
+		fmt.Printf("Segments at index %d or %d no longer exist in current state\n", leftIdx, rightIdx)
+		// We didn't queue, so unset the flag via defer
+		return false
+	}
 	leftSegment := currentState.segments[leftIdx]
 	rightSegment := currentState.segments[rightIdx]
 
@@ -774,6 +803,7 @@ func (vs *VibeStore) triggerCompaction(isManual bool) bool {
 		segments: []*col.Reader{leftSegment, rightSegment},
 	}
 
+	failToQueue = false // We successfully queued, the flag will be unset by processTask
 	return true
 }
 
@@ -795,12 +825,19 @@ func (vs *VibeStore) doCompaction(segments []*col.Reader) {
 	fmt.Printf("Compacting segments with levels %d and %d to: %s\n",
 		leftSegment.Level(), rightSegment.Level(), outputPath)
 
+	// Record start time
+	startTime := time.Now()
+
 	// Perform compaction using the multicol.Compact function
 	// This function reads from the two input segments and writes the combined,
 	// sorted, and deduplicated data to the output path.
 	err := multicol.Compact(leftSegment, rightSegment, outputPath, vs.options.CompactionOptions)
+
+	// Calculate duration
+	duration := time.Since(startTime)
+
 	if err != nil {
-		fmt.Printf("Error compacting segments: %v\n", err)
+		fmt.Printf("Error compacting segments after %.2f seconds: %v\n", duration.Seconds(), err)
 		// Attempt to clean up the potentially partial output file
 		_ = os.Remove(outputPath)
 		return
@@ -879,8 +916,8 @@ func (vs *VibeStore) doCompaction(segments []*col.Reader) {
 		newSegments = append(newSegments, reopenedSegment)
 	}
 
-	fmt.Printf("Compaction complete. Replacing segments at index %d and %d with new segment (level %d)\n",
-		leftPos, rightPos, newSegment.Level())
+	fmt.Printf("Compaction complete in %.2f seconds. Replacing segments at index %d and %d with new segment (level %d)\n",
+		duration.Seconds(), leftPos, rightPos, newSegment.Level())
 
 	// Create the new state object
 	newState := &VibeStoreState{
@@ -910,6 +947,7 @@ func (vs *VibeStore) doCompaction(segments []*col.Reader) {
 
 // compactionChecker periodically checks if compaction is needed
 func (vs *VibeStore) compactionChecker() {
+	defer vs.workerWG.Done() // Ensure Done is called when goroutine exits
 	// If compaction is disabled, don't run the checker
 	if vs.options.DisableCompaction {
 		// Just wait for shutdown signal
@@ -947,6 +985,11 @@ func (vs *VibeStore) GetSegmentLevels() []uint16 {
 	}
 
 	return levels
+}
+
+// IsCompacting returns true if a compaction task is currently believed to be running or scheduled.
+func (vs *VibeStore) IsCompacting() bool {
+	return vs.isCompacting.Load()
 }
 
 // SegmentManifest represents the persisted state of the store

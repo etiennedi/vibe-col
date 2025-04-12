@@ -35,7 +35,7 @@ func main() {
 	importSeed := importCmd.Int64("seed", time.Now().UnixNano(), "Random seed")
 	importMaxValue := importCmd.Int64("max-value", 1000000, "Maximum value")
 	importMaxID := importCmd.Uint64("max-id", 20000000, "Maximum ID")
-	importCPUProfile := importCmd.String("cpuprofile", "", "Write CPU profile to file")
+	importCPUProfile := importCmd.String("cpuprofile", "import_cpu.prof", "Write CPU profile to file (default: import_cpu.prof)")
 	importMemProfile := importCmd.String("memprofile", "", "Write memory profile to file")
 
 	// Aggregate command flags
@@ -189,31 +189,42 @@ func runImport(numValues int, dataDir string, seed int64, maxValue int64, maxID 
 	fmt.Println("\nStarting compaction phase...")
 
 	// Force flush any remaining memtable data
+	fmt.Println("Forcing final flush...")
 	vibeStore.ForceFlush()
-	time.Sleep(500 * time.Millisecond) // Wait for flush to complete
+	fmt.Println("Final flush triggered.")
 
-	// Get initial segment levels
-	levels := vibeStore.GetSegmentLevels()
-	fmt.Printf("Initial segment levels: %v\n", levels)
-
-	// Keep compacting until no more compactions are possible
+	// Explicitly trigger and wait for the full compaction cascade
+	fmt.Println("\nStarting full compaction cascade...")
 	compactionCount := 0
 	startCompactionTime := time.Now()
-
-	for vibeStore.TriggerCompaction() {
-		compactionCount++
-		fmt.Printf("Compaction #%d triggered\n", compactionCount)
-		// Wait for the compaction to complete
-		time.Sleep(100 * time.Millisecond)
+	for {
+		triggered := vibeStore.TriggerCompaction() // Attempt to trigger
+		if triggered {
+			compactionCount++
+			fmt.Printf("Compaction #%d triggered by load test loop\n", compactionCount)
+			// Wait a short time to allow the triggered compaction to start
+			// and potentially complete, or for the isCompacting flag to be released.
+			time.Sleep(50 * time.Millisecond)
+		} else {
+			// TriggerCompaction returned false. Check *why*.
+			// If a compaction is already running, just wait and retry.
+			if vibeStore.IsCompacting() { // Need to add IsCompacting method
+				time.Sleep(100 * time.Millisecond) // Wait longer if a compaction is known to be running
+				continue                           // Retry triggering
+			} else {
+				// No compaction running, and no pair was found, so we are done.
+				fmt.Println("No more eligible compaction pairs found.")
+				break // Exit the loop
+			}
+		}
 	}
+	compactionElapsed := time.Since(startCompactionTime)
+	fmt.Printf("\nFull compaction cascade completed in %.2f seconds\n", compactionElapsed)
+	fmt.Printf("Triggered %d compactions during cascade\n", compactionCount)
 
-	compactionElapsed := time.Since(startCompactionTime).Seconds()
-	fmt.Printf("\nCompaction phase completed in %.2f seconds\n", compactionElapsed)
-	fmt.Printf("Performed %d compactions\n", compactionCount)
-
-	// Get final segment levels
+	// Get final segment levels after full compaction
 	finalLevels := vibeStore.GetSegmentLevels()
-	fmt.Printf("Final segment levels: %v\n", finalLevels)
+	fmt.Printf("\nFinal segment levels after full compaction: %v\n", finalLevels)
 
 	// Perform a final aggregation to verify the data
 	fmt.Println("\nVerifying data by running aggregation...")
