@@ -210,12 +210,10 @@ func (vs *VibeStore) processTask(t task) {
 	switch t.taskType {
 	case taskFlush:
 		vs.doFlushMemtable(t.memtable)
-		// Trigger compaction check after flush
-		vs.triggerCompaction()
 	case taskCompaction:
 		vs.doCompaction(t.segments)
 		// Check if more compaction is needed
-		vs.triggerCompaction()
+		_ = vs.triggerCompaction(false)
 	case taskCleanup:
 		vs.doCleanup(t.oldState)
 	}
@@ -595,9 +593,10 @@ func (vs *VibeStore) ForceFlush() {
 }
 
 // TriggerCompaction manually triggers a compaction cycle
-// This is primarily used for testing
-func (vs *VibeStore) TriggerCompaction() {
-	vs.triggerCompaction()
+// Returns true if a compaction was triggered, false if no eligible segments were found
+func (vs *VibeStore) TriggerCompaction() bool {
+	// When called explicitly, allow compaction even if automatic compaction is disabled
+	return vs.triggerCompaction(true)
 }
 
 // findCompactionPair identifies the best pair of segments to compact
@@ -627,10 +626,14 @@ func (vs *VibeStore) findCompactionPair() (int, int) {
 }
 
 // triggerCompaction checks if compaction is needed and schedules it
-func (vs *VibeStore) triggerCompaction() {
-	// If compaction is disabled, do nothing
-	if vs.options.DisableCompaction {
-		return
+// Returns true if a compaction was triggered, false otherwise
+// The isManual parameter indicates whether this is a manual trigger (true) or automatic (false)
+func (vs *VibeStore) triggerCompaction(isManual bool) bool {
+	// If compaction is disabled and this is NOT a manual request, do nothing
+	if vs.options.DisableCompaction && !isManual {
+		// Only log when we're blocking an automatic compaction
+		fmt.Printf("Automatic compaction is disabled via options.DisableCompaction\n")
+		return false
 	}
 
 	// Find a pair of segments to compact
@@ -638,7 +641,15 @@ func (vs *VibeStore) triggerCompaction() {
 
 	// If no eligible pair, return without scheduling a task
 	if leftIdx < 0 || rightIdx < 0 {
-		return
+		fmt.Printf("No eligible segment pairs found for compaction\n")
+		currentState := vs.state.Load().(*VibeStoreState)
+		if len(currentState.segments) >= 2 {
+			fmt.Printf("Have %d segments but none with matching levels\n", len(currentState.segments))
+			for i, segment := range currentState.segments {
+				fmt.Printf("Segment %d has level %d\n", i, segment.Level())
+			}
+		}
+		return false
 	}
 
 	// Get segments to compact
@@ -646,11 +657,16 @@ func (vs *VibeStore) triggerCompaction() {
 	leftSegment := currentState.segments[leftIdx]
 	rightSegment := currentState.segments[rightIdx]
 
+	fmt.Printf("Found eligible segments for compaction: index %d (level %d) and %d (level %d)\n",
+		leftIdx, leftSegment.Level(), rightIdx, rightSegment.Level())
+
 	// Schedule compaction task
 	vs.taskQueue <- task{
 		taskType: taskCompaction,
 		segments: []*col.Reader{leftSegment, rightSegment},
 	}
+
+	return true
 }
 
 // doCompaction performs segment compaction (called by the background worker)
@@ -765,7 +781,7 @@ func (vs *VibeStore) compactionChecker() {
 	for {
 		select {
 		case <-ticker.C:
-			vs.triggerCompaction()
+			_ = vs.triggerCompaction(false) // This is an automatic compaction
 		case <-vs.shutdown:
 			return
 		}

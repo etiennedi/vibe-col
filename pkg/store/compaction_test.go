@@ -230,3 +230,180 @@ func TestCompactionStrategy(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
+// Test to verify that TriggerCompaction returns the correct boolean value
+func TestTriggerCompactionReturnValue(t *testing.T) {
+	// Create a temporary directory for testing
+	tempDir, err := os.MkdirTemp("", "vibe-store-compaction-return-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	// Create a new directory for each store to avoid sharing segments
+	customStoreDir, err := os.MkdirTemp("", "vibe-store-compaction-custom-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(customStoreDir)
+
+	// Create store with test options
+	options := DefaultOptions(tempDir)
+	// Completely disable automatic compaction
+	options.CompactionCheckIntervalMs = 0 // 0 means disable compaction checker
+	options.DisableCompaction = false
+
+	store, err := NewVibeStore(options)
+	require.NoError(t, err)
+	defer store.Close()
+
+	// Test Case 1: Empty store - should return false since there's nothing to compact
+	result := store.TriggerCompaction()
+	assert.False(t, result, "Expected false when no segments exist")
+
+	// Test Case 2: Create the segments with the same level (0)
+	customOptions := DefaultOptions(customStoreDir)
+	customOptions.DisableCompaction = false     // Allow compaction to be triggered manually
+	customOptions.CompactionCheckIntervalMs = 0 // Disable periodic checks
+
+	// Create a new store with fresh segment files
+	customStore, err := NewVibeStore(customOptions)
+	require.NoError(t, err)
+	defer customStore.Close()
+
+	// Create segments with the same level for testing
+	// Add data to create segments with level 0
+	for i := 0; i < 2; i++ {
+		for j := uint64(0); j < 5; j++ {
+			id := j + uint64(i*100)
+			err := customStore.Add(id, int64(id*10))
+			require.NoError(t, err)
+		}
+		customStore.ForceFlush()
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// Check the levels in the custom store
+	customLevels := customStore.GetSegmentLevels()
+	t.Logf("Custom store segment levels: %v", customLevels)
+
+	// At this point we should have 2 segments with the same level (0) in our custom store,
+	// so TriggerCompaction should return true
+	result = customStore.TriggerCompaction()
+	assert.True(t, result, "Expected true when segments have the same level")
+
+	// Wait for the compaction to complete
+	time.Sleep(300 * time.Millisecond)
+
+	// Verify compaction occurred by checking levels
+	compactedLevels := customStore.GetSegmentLevels()
+	t.Logf("Segment levels after compaction: %v", compactedLevels)
+
+	// Should have one segment with level 1 after compaction
+	if len(compactedLevels) == 1 {
+		assert.Equal(t, uint16(1), compactedLevels[0], "Compacted segment should have level 1")
+	}
+
+	// Test Case 3: Demonstrate loop pattern for bulk imports
+	// Create a new store for this test
+	bulkStoreDir, err := os.MkdirTemp("", "vibe-store-compaction-bulk-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(bulkStoreDir)
+
+	bulkOptions := DefaultOptions(bulkStoreDir)
+	bulkOptions.DisableCompaction = false
+	bulkOptions.CompactionCheckIntervalMs = 0
+
+	bulkStore, err := NewVibeStore(bulkOptions)
+	require.NoError(t, err)
+	defer bulkStore.Close()
+
+	// Create 4 segments with level 0
+	for i := 0; i < 4; i++ {
+		for j := uint64(0); j < 5; j++ {
+			id := j + uint64(i*1000)
+			err := bulkStore.Add(id, int64(id*10))
+			require.NoError(t, err)
+		}
+		bulkStore.ForceFlush()
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// Log initial levels
+	initialBulkLevels := bulkStore.GetSegmentLevels()
+	t.Logf("Initial bulk store levels: %v", initialBulkLevels)
+
+	// Keep compacting until no more compactions are possible
+	compactionCount := 0
+	for i := 0; i < 10; i++ { // Cap at 10 iterations as a safety measure
+		if bulkStore.TriggerCompaction() {
+			compactionCount++
+			t.Logf("Compaction #%d triggered", compactionCount)
+			// Wait for the compaction to complete
+			time.Sleep(300 * time.Millisecond)
+		} else {
+			break
+		}
+	}
+
+	// Log the final levels and number of compactions performed
+	finalBulkLevels := bulkStore.GetSegmentLevels()
+	t.Logf("Final bulk store levels after %d compactions: %v", compactionCount, finalBulkLevels)
+	assert.Greater(t, compactionCount, 0, "At least one compaction should have occurred")
+}
+
+// TestManualCompactionWhenDisabled verifies that manual compaction still works
+// even when automatic compaction is disabled
+func TestManualCompactionWhenDisabled(t *testing.T) {
+	// Create a temporary directory for testing
+	tempDir, err := os.MkdirTemp("", "vibe-store-manual-compaction-test-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	// Create store with test options
+	options := DefaultOptions(tempDir)
+	// Disable automatic compaction
+	options.DisableCompaction = true
+	options.CompactionCheckIntervalMs = 0 // Also disable periodic checks
+
+	store, err := NewVibeStore(options)
+	require.NoError(t, err)
+	defer store.Close()
+
+	// Create 2 segments with level 0
+	for i := 0; i < 2; i++ {
+		for j := uint64(0); j < 5; j++ {
+			id := j + uint64(i*100)
+			err := store.Add(id, int64(id*10))
+			require.NoError(t, err)
+		}
+		store.ForceFlush()
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// Check initial levels
+	initialLevels := store.GetSegmentLevels()
+	t.Logf("Initial segment levels: %v", initialLevels)
+	require.Equal(t, 2, len(initialLevels), "Should have 2 segments")
+	require.Equal(t, []uint16{0, 0}, initialLevels, "Both segments should have level 0")
+
+	// Wait a bit to ensure no automatic compaction occurs
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify levels haven't changed (no automatic compaction)
+	levelsAfterWait := store.GetSegmentLevels()
+	assert.Equal(t, initialLevels, levelsAfterWait, "Levels should not change when automatic compaction is disabled")
+
+	// Now trigger manual compaction
+	result := store.TriggerCompaction()
+	assert.True(t, result, "Manual compaction should be triggered even with DisableCompaction=true")
+
+	// Wait for compaction to complete
+	time.Sleep(300 * time.Millisecond)
+
+	// Verify compaction occurred
+	finalLevels := store.GetSegmentLevels()
+	t.Logf("Final segment levels: %v", finalLevels)
+
+	// We should now have a single segment with level 1
+	assert.Equal(t, 1, len(finalLevels), "Should have 1 segment after compaction")
+	if len(finalLevels) == 1 {
+		assert.Equal(t, uint16(1), finalLevels[0], "Compacted segment should have level 1")
+	}
+}
