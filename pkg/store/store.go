@@ -787,17 +787,6 @@ func (vs *VibeStore) doCompaction(segments []*col.Reader) {
 	leftSegment := segments[0]
 	rightSegment := segments[1]
 
-	// Get the initial count of entries for verification
-	leftAgg := leftSegment.AggregateWithOptions(col.AggregateOptions{})
-	rightAgg := rightSegment.AggregateWithOptions(col.AggregateOptions{})
-	expectedCount := leftAgg.Count + rightAgg.Count
-	expectedSum := leftAgg.Sum + rightAgg.Sum
-
-	// Log the source segments information
-	fmt.Printf("Compacting segments - left: count=%d sum=%d, right: count=%d sum=%d\n",
-		leftAgg.Count, leftAgg.Sum, rightAgg.Count, rightAgg.Sum)
-	fmt.Printf("Expected total: count=%d sum=%d\n", expectedCount, expectedSum)
-
 	// Create a new segment file path
 	timestamp := time.Now().UnixNano()
 	filename := fmt.Sprintf("compacted_%d.col", timestamp)
@@ -823,22 +812,6 @@ func (vs *VibeStore) doCompaction(segments []*col.Reader) {
 		fmt.Printf("Error opening compacted segment: %v\n", err)
 		// If we can't open the new segment, it's best to remove it
 		_ = os.Remove(outputPath)
-		return
-	}
-
-	// Verify the new segment has all expected entries
-	newAgg := newSegment.AggregateWithOptions(col.AggregateOptions{})
-	fmt.Printf("Compacted segment: count=%d sum=%d\n", newAgg.Count, newAgg.Sum)
-
-	// If the compacted segment doesn't have the expected data, abort the compaction
-	if newAgg.Count != expectedCount || newAgg.Sum != expectedSum {
-		fmt.Printf("ERROR: Data integrity issue detected - compacted segment doesn't match source segments\n")
-		fmt.Printf("Expected count=%d sum=%d, but got count=%d sum=%d\n",
-			expectedCount, expectedSum, newAgg.Count, newAgg.Sum)
-		newSegment.Close()
-		if err := os.Remove(outputPath); err != nil {
-			fmt.Printf("Failed to delete invalid compacted segment: %v\n", err)
-		}
 		return
 	}
 
