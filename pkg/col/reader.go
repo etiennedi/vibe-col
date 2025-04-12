@@ -4,55 +4,63 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/weaviate/sroar"
 )
 
-// Reader reads a column file
+// Reader represents a COL file reader
 type Reader struct {
+	filePath        string // Store the file path for logging/debugging
 	file            *os.File
 	fileSize        int64
-	header          FileHeader
+	header          FileHeader // Store header info
 	footerMeta      FooterMetadata
-	blockIndex      []FooterEntry
-	globalIDs       *sroar.Bitmap
-	deletedIDs      *sroar.Bitmap
-	cacheGlobalIDs  bool // Whether to cache the global ID bitmap
-	cacheDeletedIDs bool // Whether to cache the deleted IDs bitmap
+	blockIndex      []FooterEntry // Store footer info
+	globalIDs       *sroar.Bitmap // Bitmap of all IDs in the file
+	deletedIDs      *sroar.Bitmap // Bitmap of deleted IDs (tombstones)
+	cacheGlobalIDs  bool          // Whether to cache the global ID bitmap
+	cacheDeletedIDs bool          // Whether to cache the deleted IDs bitmap
+	mutex           sync.RWMutex  // Mutex for thread safety during concurrent reads
+
+	// Aggregation source implementation
+	isAggregateSource bool // Marker to satisfy interface
 }
 
 // NewReader creates a new column file reader
-func NewReader(filename string) (*Reader, error) {
-	file, err := os.Open(filename)
+func NewReader(filePath string) (*Reader, error) {
+	file, err := os.Open(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %w", err)
+		return nil, fmt.Errorf("failed to open file %s: %w", filePath, err)
 	}
 
 	// Get file size immediately as we'll need it for various offset calculations
 	fileInfo, err := file.Stat()
 	if err != nil {
 		file.Close()
-		return nil, fmt.Errorf("failed to get file info: %w", err)
+		return nil, fmt.Errorf("failed to get file info for %s: %w", filePath, err)
 	}
 	fileSize := fileInfo.Size()
 
 	reader := &Reader{
-		file:            file,
-		fileSize:        fileSize,
-		cacheGlobalIDs:  false, // Caching is off by default
-		cacheDeletedIDs: false, // Caching is off by default
+		file:              file,
+		filePath:          filePath, // Set the file path
+		fileSize:          fileSize,
+		cacheGlobalIDs:    false, // Caching is off by default
+		cacheDeletedIDs:   false, // Caching is off by default
+		isAggregateSource: true,
 	}
 
 	// Read the file header
 	if err := reader.readHeader(); err != nil {
 		file.Close()
-		return nil, fmt.Errorf("failed to read header: %w", err)
+		return nil, fmt.Errorf("failed to read header from %s: %w", filePath, err)
 	}
 
 	// Read the footer
 	if err := reader.readFooter(); err != nil {
 		file.Close()
-		return nil, fmt.Errorf("failed to read footer: %w", err)
+		return nil, fmt.Errorf("failed to read footer from %s: %w", filePath, err)
 	}
 
 	return reader, nil
@@ -322,4 +330,9 @@ func (r *Reader) GetDeletedIDBitmap() (*sroar.Bitmap, error) {
 // Level returns the compaction level of the file
 func (r *Reader) Level() uint16 {
 	return r.header.Level
+}
+
+// FilePath returns the path of the file being read
+func (r *Reader) FilePath() string {
+	return r.filePath
 }

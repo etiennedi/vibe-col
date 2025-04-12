@@ -107,8 +107,11 @@ func countSegmentFiles(dir string) (int, error) {
 
 	count := 0
 	for _, file := range files {
-		if !file.IsDir() && strings.HasPrefix(file.Name(), "segment_") && strings.HasSuffix(file.Name(), ".col") {
-			count++
+		if !file.IsDir() && strings.HasSuffix(file.Name(), ".col") {
+			// Count both regular segments and compacted segments
+			if strings.HasPrefix(file.Name(), "segment_") || strings.HasPrefix(file.Name(), "compacted_") {
+				count++
+			}
 		}
 	}
 	return count, nil

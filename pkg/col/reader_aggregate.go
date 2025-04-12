@@ -144,11 +144,9 @@ func (r *Reader) FilteredBlockIterator(filter, denyFilter *sroar.Bitmap) []uint6
 		return blocks
 	}
 
-	var matchingBlocks []uint64
-
-	// If only deny filter is provided, we need to check all blocks
+	// If only deny filter is provided, we MUST check all blocks.
+	// The filtering happens at the value level in readBlockFiltered.
 	if filter == nil && denyFilter != nil {
-		// We still need to check all blocks since we're only excluding IDs
 		blocks := make([]uint64, r.BlockCount())
 		for i := range blocks {
 			blocks[i] = uint64(i)
@@ -156,7 +154,9 @@ func (r *Reader) FilteredBlockIterator(filter, denyFilter *sroar.Bitmap) []uint6
 		return blocks
 	}
 
-	// If allow filter is provided, use it to find matching blocks
+	// If allow filter is provided, use it to find potentially matching blocks based on ID range.
+	// We still need to consider the denyFilter at the value level later.
+	var matchingBlocks []uint64
 	if filter != nil {
 		// Get filter range
 		filterMin := filter.Minimum()
@@ -169,8 +169,17 @@ func (r *Reader) FilteredBlockIterator(filter, denyFilter *sroar.Bitmap) []uint6
 				continue
 			}
 
+			// Add block if its range overlaps with the filter
 			matchingBlocks = append(matchingBlocks, uint64(i))
 		}
+	} else {
+		// This case should theoretically not be reached due to the checks above,
+		// but return all blocks as a fallback if filter is nil but denyFilter is not handled above.
+		blocks := make([]uint64, r.BlockCount())
+		for i := range blocks {
+			blocks[i] = uint64(i)
+		}
+		return blocks
 	}
 
 	return matchingBlocks

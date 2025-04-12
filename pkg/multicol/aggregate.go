@@ -72,47 +72,43 @@ func (mr *MultiReader) Aggregate(opts AggregateOptions) (col.AggregateResult, er
 	// Initialize the result with zero values
 	result := col.AggregateResult{}
 
-	// Initialize an empty deny bitmap to track processed IDs
+	// Initialize an empty deny bitmap to track processed IDs from newer sources
 	denyBitmap := sroar.NewBitmap()
 
-	// Process readers from newest to oldest
+	// Process readers from newest (end of slice) to oldest (start of slice)
 	for i := len(mr.readers) - 1; i >= 0; i-- {
 		reader := mr.readers[i]
 
-		// Create aggregation options for this reader
+		// Create aggregation options for this reader, passing the current denyBitmap
 		readerOpts := col.AggregateOptions{
 			SkipPreCalculated: opts.SkipPreCalculated,
 			Filter:            opts.Filter,
-			DenyFilter:        denyBitmap,
+			DenyFilter:        denyBitmap.Clone(), // Pass a clone to avoid modification by the reader
 		}
 
 		// Aggregate this reader with the current deny filter
 		readerResult := reader.AggregateWithOptions(readerOpts)
 
-		// Get the global ID bitmap for this reader
+		// Get the global ID bitmap for *this* reader (IDs present in this reader)
 		globalIDs, err := reader.GetGlobalIDBitmap()
 		if err != nil {
 			return col.AggregateResult{}, fmt.Errorf("failed to get global ID bitmap from reader %d: %w", i, err)
 		}
 
-		// Get the deleted ID bitmap for this reader
+		// Get the deleted ID bitmap for *this* reader (tombstones in this reader)
 		deletedIDs, err := reader.GetDeletedIDBitmap()
 		if err != nil {
 			return col.AggregateResult{}, fmt.Errorf("failed to get deleted ID bitmap from reader %d: %w", i, err)
 		}
 
-		// Add all IDs from this reader to the deny bitmap for older readers
-		// This includes both updated and deleted IDs
-		denyBitmap = denyBitmap.Or(globalIDs).Or(deletedIDs)
+		// Add all existing and deleted IDs from the *current* reader to the deny bitmap.
+		// This ensures that older readers (processed next) will ignore any IDs
+		// that were present (updated or deleted) in this newer reader.
+		denyBitmap.Or(globalIDs)
+		denyBitmap.Or(deletedIDs)
 
 		// Merge the results
-		if result.Count == 0 {
-			// First result, just copy it
-			result = readerResult
-		} else {
-			// Merge with existing result
-			result = mergeAggregateResults(result, readerResult)
-		}
+		result = mergeAggregateResults(result, readerResult)
 	}
 
 	return result, nil

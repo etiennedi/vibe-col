@@ -2,6 +2,7 @@
 package store
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -81,6 +82,7 @@ type VibeStoreState struct {
 // getMultiReader returns the cached MultiReader for the current state
 // or creates a new one if needed
 func (state *VibeStoreState) getMultiReader() *multicol.MultiReader {
+	// First, check if we already have a cached reader (fast path)
 	state.multiReaderLock.RLock()
 	if state.multiReader != nil {
 		reader := state.multiReader
@@ -89,7 +91,7 @@ func (state *VibeStoreState) getMultiReader() *multicol.MultiReader {
 	}
 	state.multiReaderLock.RUnlock()
 
-	// Need to create a new MultiReader
+	// Need to create a new MultiReader (slow path)
 	state.multiReaderLock.Lock()
 	defer state.multiReaderLock.Unlock()
 
@@ -102,7 +104,8 @@ func (state *VibeStoreState) getMultiReader() *multicol.MultiReader {
 	sources := make([]multicol.AggregateSource, 0,
 		len(state.segments)+len(state.flushingMemtables)+1)
 
-	// Add segments (oldest first)
+	// Add segments (oldest first) - these may include both original
+	// and compacted segments during transitions
 	for _, segment := range state.segments {
 		sources = append(sources, segment)
 	}
@@ -162,6 +165,16 @@ func NewVibeStore(options VibeStoreOptions) (*VibeStore, error) {
 		segments:          make([]*col.Reader, 0),
 	}
 	store.state.Store(initialState)
+
+	// Load segments from manifest if it exists
+	if err := store.loadManifest(); err != nil {
+		// Close any segments we may have opened
+		currentState := store.state.Load().(*VibeStoreState)
+		for _, segment := range currentState.segments {
+			segment.Close()
+		}
+		return nil, fmt.Errorf("failed to load manifest: %w", err)
+	}
 
 	// Start the background worker
 	go store.backgroundWorker()
@@ -504,9 +517,24 @@ func (vs *VibeStore) doFlushMemtable(memtable multicol.Memtable) {
 	}
 
 	// Add new segment (ensuring newest is last)
-	newSegments := make([]*col.Reader, len(currentState.segments)+1)
-	copy(newSegments, currentState.segments)
-	newSegments[len(currentState.segments)] = newSegment
+	// IMPORTANT: Reopen existing segments to get new file handles
+	newSegments := make([]*col.Reader, 0, len(currentState.segments)+1)
+	for _, existingSegment := range currentState.segments {
+		reopenedSegment, err := col.NewReader(existingSegment.FilePath())
+		if err != nil {
+			vs.stateLock.Unlock()
+			newSegment.Close() // Close the newly created segment
+			// Close previously reopened segments
+			for _, seg := range newSegments {
+				seg.Close()
+			}
+			fmt.Printf("ERROR: Failed to reopen existing segment %s during flush state update: %v\n", existingSegment.FilePath(), err)
+			return
+		}
+		newSegments = append(newSegments, reopenedSegment)
+	}
+	// Append the newly flushed segment
+	newSegments = append(newSegments, newSegment)
 
 	// Create new state
 	newState := &VibeStoreState{
@@ -522,6 +550,11 @@ func (vs *VibeStore) doFlushMemtable(memtable multicol.Memtable) {
 	vs.state.Store(newState)
 	vs.stateLock.Unlock()
 
+	// Save the updated manifest
+	if err := vs.saveManifest(); err != nil {
+		fmt.Printf("Warning: Failed to save manifest after flush: %v\n", err)
+	}
+
 	// Schedule old state cleanup
 	vs.taskQueue <- task{
 		taskType: taskCleanup,
@@ -531,18 +564,58 @@ func (vs *VibeStore) doFlushMemtable(memtable multicol.Memtable) {
 
 // doCleanup cleans up resources from an old state
 func (vs *VibeStore) doCleanup(oldState *VibeStoreState) {
-	// Wait until no readers are using the old state
+	// Wait until no readers are using the old state.
+	// This is crucial for ensuring data consistency during compaction and flushes.
+	// Readers increment the counter when they start using a state and decrement when done.
 	for oldState.readerCount.Load() > 0 {
+		//fmt.Printf("Cleanup waiting: %d readers still using old state\n", oldState.readerCount.Load())
 		time.Sleep(10 * time.Millisecond)
 	}
+	//fmt.Printf("Cleanup proceeding: No readers left for old state\n")
 
-	// Cleanup MultiReader if it exists
+	// Cleanup the MultiReader associated with the old state, if it exists
 	oldState.multiReaderLock.Lock()
 	if oldState.multiReader != nil {
-		oldState.multiReader.Close()
+		oldState.multiReader.Close() // Close the MultiReader itself
 		oldState.multiReader = nil
 	}
 	oldState.multiReaderLock.Unlock()
+
+	// Get the current state to identify which segments are still active
+	currentState := vs.state.Load().(*VibeStoreState)
+
+	// Create a map of active segment file paths for efficient lookup
+	activeSegmentPaths := make(map[string]bool)
+	for _, segment := range currentState.segments {
+		activeSegmentPaths[segment.FilePath()] = true
+	}
+
+	// Iterate through the segments in the *old* state
+	for _, segment := range oldState.segments {
+		filePath := segment.FilePath()
+
+		// Check if this segment is still present in the *current* state
+		if activeSegmentPaths[filePath] {
+			//fmt.Printf("Cleanup skipping active segment: %s\n", filePath)
+			continue // Segment is still active, do not close or delete
+		}
+
+		// If the segment is NOT in the current state, it means it was replaced
+		// (e.g., by compaction) and is safe to close and delete.
+		fmt.Printf("Cleanup closing and deleting segment: %s\n", filePath)
+
+		// Close the segment reader first
+		if err := segment.Close(); err != nil {
+			// Log the error but proceed to attempt file deletion
+			fmt.Printf("Warning: Error closing segment %s: %v\n", filePath, err)
+		}
+
+		// Delete the segment file from the filesystem
+		if err := os.Remove(filePath); err != nil {
+			// Log the error if deletion fails
+			fmt.Printf("Warning: Failed to delete segment file %s: %v\n", filePath, err)
+		}
+	}
 }
 
 // Close shuts down the store gracefully
@@ -562,9 +635,44 @@ func (vs *VibeStore) Close() error {
 		if err != nil {
 			return fmt.Errorf("error flushing final memtable: %w", err)
 		}
+
+		// Open the newly created segment
+		newSegment, err := col.NewReader(segmentPath)
+		if err != nil {
+			fmt.Printf("Error opening final segment: %v\n", err)
+		} else {
+			// Add it to the state
+			vs.stateLock.Lock()
+			finalState := vs.state.Load().(*VibeStoreState)
+			newSegments := make([]*col.Reader, len(finalState.segments)+1)
+			copy(newSegments, finalState.segments)
+			newSegments[len(finalState.segments)] = newSegment
+
+			newState := &VibeStoreState{
+				activeMemtable:    finalState.activeMemtable,
+				activeSince:       finalState.activeSince,
+				flushingMemtables: finalState.flushingMemtables,
+				segments:          newSegments,
+				multiReader:       nil, // Will be created on demand
+			}
+
+			vs.state.Store(newState)
+			vs.stateLock.Unlock()
+
+			// Save the final manifest
+			if err := vs.saveManifest(); err != nil {
+				fmt.Printf("Warning: Failed to save manifest during close: %v\n", err)
+			}
+		}
+	} else {
+		// Even if there's no new segment, save the manifest one last time
+		if err := vs.saveManifest(); err != nil {
+			fmt.Printf("Warning: Failed to save manifest during close: %v\n", err)
+		}
 	}
 
 	// Close all resources
+	currentState = vs.state.Load().(*VibeStoreState)
 	for _, segment := range currentState.segments {
 		segment.Close()
 	}
@@ -679,6 +787,17 @@ func (vs *VibeStore) doCompaction(segments []*col.Reader) {
 	leftSegment := segments[0]
 	rightSegment := segments[1]
 
+	// Get the initial count of entries for verification
+	leftAgg := leftSegment.AggregateWithOptions(col.AggregateOptions{})
+	rightAgg := rightSegment.AggregateWithOptions(col.AggregateOptions{})
+	expectedCount := leftAgg.Count + rightAgg.Count
+	expectedSum := leftAgg.Sum + rightAgg.Sum
+
+	// Log the source segments information
+	fmt.Printf("Compacting segments - left: count=%d sum=%d, right: count=%d sum=%d\n",
+		leftAgg.Count, leftAgg.Sum, rightAgg.Count, rightAgg.Sum)
+	fmt.Printf("Expected total: count=%d sum=%d\n", expectedCount, expectedSum)
+
 	// Create a new segment file path
 	timestamp := time.Now().UnixNano()
 	filename := fmt.Sprintf("compacted_%d.col", timestamp)
@@ -688,10 +807,13 @@ func (vs *VibeStore) doCompaction(segments []*col.Reader) {
 		leftSegment.Level(), rightSegment.Level(), outputPath)
 
 	// Perform compaction using the multicol.Compact function
-	// This will automatically calculate the level based on our rules
+	// This function reads from the two input segments and writes the combined,
+	// sorted, and deduplicated data to the output path.
 	err := multicol.Compact(leftSegment, rightSegment, outputPath, vs.options.CompactionOptions)
 	if err != nil {
 		fmt.Printf("Error compacting segments: %v\n", err)
+		// Attempt to clean up the potentially partial output file
+		_ = os.Remove(outputPath)
 		return
 	}
 
@@ -699,15 +821,33 @@ func (vs *VibeStore) doCompaction(segments []*col.Reader) {
 	newSegment, err := col.NewReader(outputPath)
 	if err != nil {
 		fmt.Printf("Error opening compacted segment: %v\n", err)
+		// If we can't open the new segment, it's best to remove it
+		_ = os.Remove(outputPath)
 		return
 	}
 
-	// Update state to replace the compacted segments with the new one
+	// Verify the new segment has all expected entries
+	newAgg := newSegment.AggregateWithOptions(col.AggregateOptions{})
+	fmt.Printf("Compacted segment: count=%d sum=%d\n", newAgg.Count, newAgg.Sum)
+
+	// If the compacted segment doesn't have the expected data, abort the compaction
+	if newAgg.Count != expectedCount || newAgg.Sum != expectedSum {
+		fmt.Printf("ERROR: Data integrity issue detected - compacted segment doesn't match source segments\n")
+		fmt.Printf("Expected count=%d sum=%d, but got count=%d sum=%d\n",
+			expectedCount, expectedSum, newAgg.Count, newAgg.Sum)
+		newSegment.Close()
+		if err := os.Remove(outputPath); err != nil {
+			fmt.Printf("Failed to delete invalid compacted segment: %v\n", err)
+		}
+		return
+	}
+
+	// Atomically update the store state
 	vs.stateLock.Lock()
 	currentState := vs.state.Load().(*VibeStoreState)
 
-	// Find the positions of the segments in the current state
-	// They might have changed since we first selected them
+	// Find the positions of the segments in the *current* state again,
+	// as the state might have changed while we were compacting.
 	leftPos := -1
 	rightPos := -1
 	for i, segment := range currentState.segments {
@@ -718,46 +858,81 @@ func (vs *VibeStore) doCompaction(segments []*col.Reader) {
 		}
 	}
 
-	// If segments are not consecutive or not found, abort
+	// If segments are not consecutive or not found in the current state, abort.
 	if leftPos < 0 || rightPos < 0 || rightPos != leftPos+1 {
 		vs.stateLock.Unlock()
 		newSegment.Close()
-		fmt.Printf("Segments are no longer valid for compaction\n")
+		_ = os.Remove(outputPath)
+		fmt.Printf("Segments [%s, %s] are no longer valid for compaction in the current state\n",
+			leftSegment.FilePath(), rightSegment.FilePath())
 		return
 	}
 
-	// Create new segment array with the compacted segment
+	// Create the new list of segments for the next state
+	// IMPORTANT: Reopen existing segments to get new file handles
 	newSegments := make([]*col.Reader, 0, len(currentState.segments)-1)
-	newSegments = append(newSegments, currentState.segments[:leftPos]...)
+
+	// Reopen segments before the compacted range
+	for i := 0; i < leftPos; i++ {
+		reopenedSegment, err := col.NewReader(currentState.segments[i].FilePath())
+		if err != nil {
+			vs.stateLock.Unlock()
+			newSegment.Close()
+			_ = os.Remove(outputPath)
+			fmt.Printf("ERROR: Failed to reopen segment %s during compaction state update: %v\n", currentState.segments[i].FilePath(), err)
+			// Note: This leaves the store in a potentially inconsistent state. Recovery might be needed.
+			return
+		}
+		newSegments = append(newSegments, reopenedSegment)
+	}
+
+	// Add the newly compacted segment
 	newSegments = append(newSegments, newSegment)
-	newSegments = append(newSegments, currentState.segments[rightPos+1:]...)
 
-	fmt.Printf("Compaction complete. New segment has level %d\n", newSegment.Level())
+	// Reopen segments after the compacted range
+	for i := rightPos + 1; i < len(currentState.segments); i++ {
+		reopenedSegment, err := col.NewReader(currentState.segments[i].FilePath())
+		if err != nil {
+			vs.stateLock.Unlock()
+			newSegment.Close()
+			_ = os.Remove(outputPath)
+			// Close previously reopened segments in the new list
+			for _, seg := range newSegments {
+				seg.Close()
+			}
+			fmt.Printf("ERROR: Failed to reopen segment %s during compaction state update: %v\n", currentState.segments[i].FilePath(), err)
+			return
+		}
+		newSegments = append(newSegments, reopenedSegment)
+	}
 
-	// Create new state
+	fmt.Printf("Compaction complete. Replacing segments at index %d and %d with new segment (level %d)\n",
+		leftPos, rightPos, newSegment.Level())
+
+	// Create the new state object
 	newState := &VibeStoreState{
 		activeMemtable:    currentState.activeMemtable,
 		activeSince:       currentState.activeSince,
-		flushingMemtables: currentState.flushingMemtables,
+		flushingMemtables: currentState.flushingMemtables, // Memtables are handled separately
 		segments:          newSegments,
-		multiReader:       nil, // Will be created on demand
+		multiReader:       nil, // Invalidate cache, will be recreated on demand
 	}
 
-	// Store new state and create task to clean up old state
+	// Atomically swap the state
 	oldState := currentState
 	vs.state.Store(newState)
-	vs.stateLock.Unlock()
+	vs.stateLock.Unlock() // Release the lock *after* the atomic swap
 
-	// Schedule cleanup of old state
+	// Save the updated manifest reflecting the new segment list
+	if err := vs.saveManifest(); err != nil {
+		fmt.Printf("Warning: Failed to save manifest after compaction: %v\n", err)
+	}
+
+	// Schedule the cleanup of the old state
 	vs.taskQueue <- task{
 		taskType: taskCleanup,
 		oldState: oldState,
 	}
-
-	// Close the old segments since they're no longer needed
-	// This is safe because we kept the references in oldState for proper cleanup
-	leftSegment.Close()
-	rightSegment.Close()
 }
 
 // compactionChecker periodically checks if compaction is needed
@@ -799,4 +974,112 @@ func (vs *VibeStore) GetSegmentLevels() []uint16 {
 	}
 
 	return levels
+}
+
+// SegmentManifest represents the persisted state of the store
+type SegmentManifest struct {
+	ActiveSegments []SegmentInfo `json:"active_segments"`
+	LastUpdated    time.Time     `json:"last_updated"`
+	Version        int           `json:"version"` // For future format changes
+}
+
+// SegmentInfo contains metadata about a segment
+type SegmentInfo struct {
+	FilePath string `json:"file_path"`
+	Level    uint16 `json:"level"`
+}
+
+// saveManifest persists the current state to disk
+func (vs *VibeStore) saveManifest() error {
+	vs.stateLock.RLock()
+	currentState := vs.state.Load().(*VibeStoreState)
+
+	// Build the manifest
+	manifest := SegmentManifest{
+		ActiveSegments: make([]SegmentInfo, len(currentState.segments)),
+		LastUpdated:    time.Now(),
+		Version:        1,
+	}
+
+	// Populate segment info
+	for i, segment := range currentState.segments {
+		manifest.ActiveSegments[i] = SegmentInfo{
+			FilePath: segment.FilePath(),
+			Level:    segment.Level(),
+		}
+	}
+	vs.stateLock.RUnlock()
+
+	// Marshal to JSON
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal manifest: %w", err)
+	}
+
+	// Write to a temporary file first
+	manifestPath := filepath.Join(vs.options.DataDir, "manifest.json")
+	tempPath := manifestPath + ".tmp"
+
+	if err := os.WriteFile(tempPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write temporary manifest: %w", err)
+	}
+
+	// Rename for atomic update
+	if err := os.Rename(tempPath, manifestPath); err != nil {
+		return fmt.Errorf("failed to finalize manifest: %w", err)
+	}
+
+	return nil
+}
+
+// loadManifest loads the persisted state from disk
+func (vs *VibeStore) loadManifest() error {
+	manifestPath := filepath.Join(vs.options.DataDir, "manifest.json")
+
+	// Check if manifest exists
+	if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
+		// No manifest, use empty state
+		return nil
+	}
+
+	// Read the manifest file
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return fmt.Errorf("failed to read manifest: %w", err)
+	}
+
+	// Parse the manifest
+	var manifest SegmentManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("failed to parse manifest: %w", err)
+	}
+
+	// Load all segments
+	segments := make([]*col.Reader, 0, len(manifest.ActiveSegments))
+	for _, info := range manifest.ActiveSegments {
+		segment, err := col.NewReader(info.FilePath)
+		if err != nil {
+			fmt.Printf("Warning: Failed to open segment %s: %v\n", info.FilePath, err)
+			continue
+		}
+		segments = append(segments, segment)
+	}
+
+	// Create a new state with the loaded segments
+	vs.stateLock.Lock()
+	currentState := vs.state.Load().(*VibeStoreState)
+
+	newState := &VibeStoreState{
+		activeMemtable:    currentState.activeMemtable,    // Keep the active memtable
+		activeSince:       currentState.activeSince,       // Keep the activation time
+		flushingMemtables: currentState.flushingMemtables, // Keep any flushing memtables
+		segments:          segments,                       // Set the loaded segments
+		multiReader:       nil,                            // Will be created on demand
+	}
+
+	vs.state.Store(newState)
+	vs.stateLock.Unlock()
+
+	fmt.Printf("Loaded %d segments from manifest\n", len(segments))
+	return nil
 }

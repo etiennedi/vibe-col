@@ -42,14 +42,15 @@ func (it *BlockIterator) Next() bool {
 		// Load the next block
 		var err error
 		it.currentIDs, it.currentValues, err = it.reader.GetPairs(it.currentBlock)
-		if err != nil || len(it.currentIDs) == 0 {
-			// Skip empty/error blocks and move to the next one
-			it.currentBlock++
-			return it.Next()
-		}
 
 		// Move to the next block for the next time we need to load
 		it.currentBlock++
+
+		// Skip empty blocks or blocks with errors
+		if err != nil || len(it.currentIDs) == 0 {
+			// Try the next block recursively
+			return it.Next()
+		}
 	}
 
 	return it.currentIndex < len(it.currentIDs)

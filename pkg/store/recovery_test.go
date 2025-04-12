@@ -124,8 +124,7 @@ func TestStoreStateRecovery(t *testing.T) {
 }
 
 // TestSegmentCleanupAfterCompaction verifies that segment files are properly deleted after compaction
-// and that aggregation results remain consistent when reopening the store, even if they temporarily
-// appear different during compaction due to the state of the compaction process
+// and that aggregation results remain consistent during and after compaction
 func TestSegmentCleanupAfterCompaction(t *testing.T) {
 	// Create a temporary directory for testing
 	tempDir, err := os.MkdirTemp("", "vibe-store-cleanup-test-*")
@@ -241,6 +240,12 @@ func TestSegmentCleanupAfterCompaction(t *testing.T) {
 	t.Logf("Aggregation comparison - Initial: count=%d, sum=%d; After compaction: count=%d, sum=%d",
 		initialResult.Count, initialResult.Sum, postCompactionResult.Count, postCompactionResult.Sum)
 
+	// MODIFIED: Add assertion that data should not be lost during compaction
+	require.Equal(t, initialResult.Count, postCompactionResult.Count,
+		"Count should remain consistent during compaction")
+	require.Equal(t, initialResult.Sum, postCompactionResult.Sum,
+		"Sum should remain consistent during compaction")
+
 	// Test filtered aggregation after compaction
 	postCompactionFilteredResult1, err := store.Aggregate(col.AggregateOptions{
 		Filter: filter1,
@@ -255,6 +260,17 @@ func TestSegmentCleanupAfterCompaction(t *testing.T) {
 	require.NoError(t, err)
 	t.Logf("Post-compaction filtered (100-104): count=%d, sum=%d",
 		postCompactionFilteredResult2.Count, postCompactionFilteredResult2.Sum)
+
+	// MODIFIED: Add assertions for filtered results as well
+	require.Equal(t, initialFilteredResult1.Count, postCompactionFilteredResult1.Count,
+		"Filtered count (0-4) should remain consistent during compaction")
+	require.Equal(t, initialFilteredResult1.Sum, postCompactionFilteredResult1.Sum,
+		"Filtered sum (0-4) should remain consistent during compaction")
+
+	require.Equal(t, initialFilteredResult2.Count, postCompactionFilteredResult2.Count,
+		"Filtered count (100-104) should remain consistent during compaction")
+	require.Equal(t, initialFilteredResult2.Sum, postCompactionFilteredResult2.Sum,
+		"Filtered sum (100-104) should remain consistent during compaction")
 
 	// Close and reopen the store to verify file cleanup persists across restarts
 	err = store.Close()
@@ -302,9 +318,7 @@ func TestSegmentCleanupAfterCompaction(t *testing.T) {
 	t.Logf("Final aggregation after reopen: count=%d, sum=%d",
 		finalResult.Count, finalResult.Sum)
 
-	// After reopening the store, aggregation results return to the original values
-	// This suggests the store recovers all data from the manifest, even if compaction
-	// temporarily showed different results
+	// Verify data consistency after reopening
 	assert.Equal(t, initialResult.Count, finalResult.Count,
 		"Count should match the initial state after reopen")
 	assert.Equal(t, initialResult.Sum, finalResult.Sum,
